@@ -9,6 +9,8 @@ qt_add_executable(TurboFIle
     WIN32 MACOSX_BUNDLE
     main.cpp
     mainwindow.cpp
+    mainwindow_navigation.cpp
+    mainwindow_tabs.cpp
     mainwindow.h
     mainwindow.ui
 )
