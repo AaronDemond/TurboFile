@@ -29,6 +29,8 @@ qt_add_executable(TurboFIle
     shellscriptdialog.h
 
     # Per-tab split-pane file explorers.
+    browser/browserbottomcontrols.cpp
+    browser/browserbottomcontrols.h
     browser/browserpane.cpp
     browser/browserpane.h
     browser/browserfilelistview.cpp

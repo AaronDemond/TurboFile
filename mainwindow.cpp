@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "browser/browserbottomcontrols.h"
 #include "browser/browserconstants.h"
 #include "browser/browserlineedit.h"
 #include "browser/browserpane.h"
@@ -51,6 +52,13 @@ MainWindow::MainWindow(QWidget *parent)
     // Create the widgets declared in mainwindow.ui.
     ui->setupUi(this);
 
+    // Establish one explicit application boundary instead of allowing child
+    // layout hints to make the window minimum grow unpredictably at runtime.
+    setMinimumSize(
+        kMainWindowMinimumWidth,
+        kMainWindowMinimumHeight
+    );
+
     // Sidebar sits beside the tab widget, not inside each tab.
     setupSidebar();
 
@@ -89,22 +97,18 @@ void MainWindow::setupViewModeControls()
     // QStatusBar stretches this container across its normal message area. The
     // search and view controls begin at the left edge; one expanding spacer
     // pushes the active directory's regular-file count to the far right.
-    bottomControlsWidget = new QWidget(ui->statusbar);
+    bottomControlsWidget =
+        new BrowserBottomControls(ui->statusbar);
     auto *layout = new QHBoxLayout(bottomControlsWidget);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
 
-    // The status row should adapt to the window, not establish the window's
-    // horizontal minimum from the combined preferred widths of search, three
-    // buttons, and the file count. SetNoConstraint permits those controls to
-    // compress or clip only at very narrow widths while the explicit browser
-    // pane minimums remain the authoritative window constraint.
+    // The child layout may compress its controls at very narrow widths, while
+    // BrowserBottomControls itself remains Expanding so QStatusBar never
+    // collapses the whole row after a pane is removed. Its custom horizontal
+    // minimum hint remains zero, preserving free window resizing.
     layout->setSizeConstraint(QLayout::SetNoConstraint);
     bottomControlsWidget->setMinimumWidth(0);
-    bottomControlsWidget->setSizePolicy(
-        QSizePolicy::Ignored,
-        QSizePolicy::Fixed
-    );
 
     // The search field and every pane path field are BrowserLineEdit objects.
     // Their visual styling therefore comes from one constructor instead of
@@ -121,9 +125,14 @@ void MainWindow::setupViewModeControls()
         new QLabel(tr("0 Files"), bottomControlsWidget);
 
     // Right alignment keeps changing digit counts anchored against the status
-    // bar edge. A zero explicit minimum allows the label to yield space when
-    // the overall window approaches the browser pane minimum.
+    // bar edge. Ignored horizontal policy makes this informational label the
+    // first control to yield space; Search and the three mode commands remain
+    // usable when the window approaches its minimum width.
     fileCountLabel->setMinimumWidth(0);
+    fileCountLabel->setSizePolicy(
+        QSizePolicy::Ignored,
+        QSizePolicy::Preferred
+    );
     fileCountLabel->setAlignment(
         Qt::AlignRight |
         Qt::AlignVCenter
@@ -161,7 +170,11 @@ void MainWindow::setupViewModeControls()
     layout->addStretch();
     layout->addWidget(fileCountLabel);
 
-    ui->statusbar->addWidget(bottomControlsWidget, 1);
+    // QStatusBar may hide normal widgets to make room for its temporary
+    // message area. These controls are permanent application chrome, so add
+    // them to the permanent area with stretch instead. They retain the full
+    // available row width during pane-close and narrow-window relayouts.
+    ui->statusbar->addPermanentWidget(bottomControlsWidget, 1);
 
     // Geometry is not final until QMainWindow lays out its central widget and
     // status bar. The sidebar event filter keeps this alignment current after
@@ -513,15 +526,15 @@ void MainWindow::alignBottomControlsToSidebar()
         return;
     }
 
-    // mapTo() compares real widget coordinates across the central widget and
-    // status bar hierarchies. The resulting left offset and frame width align
-    // both search-field edges with the pinned column instead of approximating
-    // them from saved splitter sizes or unrelated layout margins.
+    // The sidebar and status controls belong to separate branches beneath
+    // QMainWindow, so QWidget::mapTo() cannot map directly between them. That
+    // unsupported call produced "parent must be in parent hierarchy" warnings
+    // and could return a huge x coordinate that forced the window to snap wide.
+    // Bridge through global coordinates, which is valid for unrelated widgets.
+    const QPoint sidebarGlobalLeft =
+        pinnedSidebar->mapToGlobal(QPoint(0, 0));
     const QPoint sidebarLeft =
-        pinnedSidebar->mapTo(
-            bottomControlsWidget,
-            QPoint(0, 0)
-        );
+        bottomControlsWidget->mapFromGlobal(sidebarGlobalLeft);
     const int leftMargin =
         qMax(sidebarLeft.x(), 0);
     const int sidebarWidth =

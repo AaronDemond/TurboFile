@@ -13,6 +13,7 @@
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
 class BrowserPane;
+class BrowserBottomControls;
 class BrowserLineEdit;
 class DirectorySizeSortProxyModel;
 // Window-level pinned-directory panel (not per-tab).
@@ -94,7 +95,7 @@ private:
 
     // The bottom search field filters the active pane only. The adjacent view
     // buttons switch that pane's presentation between details and icon grids.
-    QWidget *bottomControlsWidget = nullptr;
+    BrowserBottomControls *bottomControlsWidget = nullptr;
     BrowserLineEdit *fileSearchLineEdit = nullptr;
     QPushButton *detailsViewButton = nullptr;
     QPushButton *smallIconsViewButton = nullptr;

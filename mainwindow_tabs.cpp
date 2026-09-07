@@ -21,6 +21,7 @@
 
 #include <QShortcut>
 #include <QKeySequence>
+#include <QTimer>
 #include <QUrl>
 
 // Configure one tab group. Every split group owns its own trailing plus tab,
@@ -537,6 +538,18 @@ void MainWindow::closePane(QWidget *page, BrowserPane *pane)
 
     updatePaneChrome();
     updateViewModeControls();
+
+    // Removing a splitter child changes the central-widget geometry after the
+    // current close signal returns. Recalculate the cross-hierarchy status-row
+    // alignment on that next layout pass so its controls remain visible.
+    QTimer::singleShot(
+        0,
+        this,
+        [this]()
+        {
+            alignBottomControlsToSidebar();
+        }
+    );
 }
 
 void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
