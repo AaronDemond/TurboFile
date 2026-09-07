@@ -6,11 +6,12 @@
 #include <QProcess>
 
 class QCloseEvent;
+class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 
-// Presents a Bash editor and runs the entered script inside one filesystem
-// directory without blocking TurboFile's UI thread.
+// Presents a modeless Bash editor and runs the entered script inside one
+// filesystem directory without blocking or disabling the explorer window.
 class ShellScriptDialog : public QDialog
 {
     Q_OBJECT
@@ -30,6 +31,10 @@ signals:
     // model listens for completion and invalidates affected cached totals.
     void scriptFinished();
 
+    // Saving creates or updates a normal filesystem item, so the explorer can
+    // invalidate the exact path without coupling this editor to its model.
+    void scriptSaved(const QString &filePath);
+
 protected:
     // Ask before terminating a running script when the window manager's close
     // button is used.
@@ -38,6 +43,10 @@ protected:
 private:
     // Validate the editor and directory, then start Bash asynchronously.
     void runScript();
+
+    // Let the user choose a destination and atomically save the current script
+    // without inserting confirmation messages into the editing or run flow.
+    void saveScript();
 
     // Request graceful termination first; QProcess escalates only if the
     // process does not stop within the short timeout.
@@ -63,13 +72,18 @@ private:
     bool confirmStopBeforeClose();
 
     QString workingDirectory;
+    QString savedFilePath;
     QPlainTextEdit *scriptEditor = nullptr;
     QPlainTextEdit *outputView = nullptr;
+    QLabel *saveStatusLabel = nullptr;
     QPushButton *runButton = nullptr;
+    QPushButton *saveButton = nullptr;
     QPushButton *stopButton = nullptr;
     QPushButton *closeButton = nullptr;
     QProcess *process = nullptr;
     bool failedToStart = false;
+    bool stopRequested = false;
+    bool closeWhenFinished = false;
 };
 
 #endif // SHELLSCRIPTDIALOG_H

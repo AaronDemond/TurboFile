@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "browser/browserpane.h"
 #include "directorysizesortproxymodel.h"
 #include "sidebar/pinnedsidebar.h"
 #include "shellscriptdialog.h"
@@ -36,11 +37,13 @@ void MainWindow::showFileContextMenu(
     const QPoint &position
 )
 {
-    TabState &state =
-        tabStates[page];
-
     QTreeView *fileTreeView =
-        state.fileTreeView;
+        fileTreeForPage(page);
+
+    if (fileTreeView == nullptr)
+    {
+        return;
+    }
 
     QModelIndex clickedIndex =
         fileTreeView->indexAt(position);
@@ -271,22 +274,18 @@ void MainWindow::showFileContextMenu(
 
 QString MainWindow::currentDirectoryPath(QWidget *page) const
 {
-    // The page pointer is the stable key for per-tab state even when users
-    // reorder tabs and their numeric QTabWidget indexes change.
+    // Actions target the active pane in this tab, not the left pane by
+    // default. The page pointer remains the stable tab key.
     auto stateIterator =
         tabStates.constFind(page);
 
-    if (stateIterator == tabStates.constEnd())
+    if (stateIterator == tabStates.constEnd() ||
+        stateIterator->activePane == nullptr)
     {
         return QString();
     }
 
-    // The tree's root index represents the directory currently displayed in
-    // this tab. filePath() maps the proxy index back to a real path.
-    QModelIndex rootIndex =
-        stateIterator->fileTreeView->rootIndex();
-
-    return fileModel->filePath(rootIndex);
+    return stateIterator->activePane->currentPath();
 }
 
 void MainWindow::createNewFile(QWidget *page)
@@ -506,13 +505,14 @@ void MainWindow::runShellScriptHere(QWidget *page)
         return;
     }
 
-    // The dialog is stack-owned by this function and executes its own modal
-    // event loop. QProcess remains asynchronous, so editing, output updates,
-    // and Stop continue responding while Bash is running.
-    ShellScriptDialog dialog(directoryPath, this);
+    // Allocate a top-level editor independently from MainWindow. The dialog's
+    // WA_DeleteOnClose attribute owns its eventual cleanup, while leaving it
+    // parentless lets the user move and interact with both windows freely.
+    auto *dialog =
+        new ShellScriptDialog(directoryPath);
 
     connect(
-        &dialog,
+        dialog,
         &ShellScriptDialog::scriptFinished,
         this,
         [this, directoryPath]()
@@ -524,21 +524,37 @@ void MainWindow::runShellScriptHere(QWidget *page)
         }
     );
 
-    dialog.exec();
+    connect(
+        dialog,
+        &ShellScriptDialog::scriptSaved,
+        this,
+        [this](const QString &filePath)
+        {
+            // Explicit invalidation updates directory totals immediately when
+            // the saved file belongs to a currently displayed filesystem.
+            fileModel->invalidatePaths({filePath});
+        }
+    );
+
+    // show() returns immediately instead of starting QDialog::exec()'s modal
+    // event loop, so the explorer remains available while the editor is open.
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::duplicateSelectedItems(QWidget *page)
 {
-    auto stateIterator =
-        tabStates.constFind(page);
+    QTreeView *fileTreeView =
+        fileTreeForPage(page);
 
-    if (stateIterator == tabStates.constEnd())
+    if (fileTreeView == nullptr)
     {
         return;
     }
 
     QStringList sourcePaths =
-        selectedFilePaths(stateIterator->fileTreeView);
+        selectedFilePaths(fileTreeView);
 
     if (sourcePaths.isEmpty())
     {
@@ -662,11 +678,16 @@ void MainWindow::openSelectedItems(
     QWidget *page
 )
 {
-    TabState &state =
-        tabStates[page];
+    QTreeView *fileTreeView =
+        fileTreeForPage(page);
+
+    if (fileTreeView == nullptr)
+    {
+        return;
+    }
 
     QStringList paths =
-        selectedFilePaths(state.fileTreeView);
+        selectedFilePaths(fileTreeView);
 
     if (paths.isEmpty())
     {
@@ -724,11 +745,16 @@ void MainWindow::copySelectedItemsToClipboard(
     QWidget *page
 )
 {
-    TabState &state =
-        tabStates[page];
+    QTreeView *fileTreeView =
+        fileTreeForPage(page);
+
+    if (fileTreeView == nullptr)
+    {
+        return;
+    }
 
     QStringList paths =
-        selectedFilePaths(state.fileTreeView);
+        selectedFilePaths(fileTreeView);
 
     if (paths.isEmpty())
     {
@@ -779,27 +805,32 @@ void MainWindow::copySelectedItemsToClipboard(
 void MainWindow::pasteClipboardItems(
     QWidget *page
 ) {
-    // get the tab's current state
-    TabState &state = tabStates[page];
-
-    // get current clipboard contents
     const QMimeData *mimeData = QApplication::clipboard()->mimeData();
 
-    // only know filesystem urls
-    if (!mimeData->hasUrls()) {
+    if (mimeData == nullptr || !mimeData->hasUrls()) {
         return;
     }
 
-    // Determine the direcory currently being displayed
-    QModelIndex currentIndex = state.fileTreeView->rootIndex();
-    QString destinationDirectory = fileModel->filePath(currentIndex);
+    copyUrlsIntoDirectory(
+        mimeData->urls(),
+        currentDirectoryPath(page)
+    );
+}
 
-    // The clipboard may contain one or many URLS
-    const QList<QUrl> urls = mimeData->urls();
+// Shared copy path for clipboard paste and inter-pane drops. Always copies
+// (never moves) and uses makeUniqueCopyPath so a drop into the same
+// directory creates "name (copy)" instead of overwriting.
+void MainWindow::copyUrlsIntoDirectory(
+    const QList<QUrl> &urls,
+    const QString &destinationDirectory
+)
+{
+    if (destinationDirectory.isEmpty())
+    {
+        return;
+    }
 
     for (const QUrl &url : urls) {
-        
-        // Ignore non-local urls
         if (!url.isLocalFile()){
             continue;
         }
@@ -807,42 +838,33 @@ void MainWindow::pasteClipboardItems(
         QString sourcePath = url.toLocalFile();
         QFileInfo sourceInfo(sourcePath);
 
-        // make sure source exists
         if (!sourceInfo.exists()){
             continue;
         }
 
-        // if already exists
-        QString destinationPath = 
+        QString destinationPath =
             makeUniqueCopyPath(sourcePath, destinationDirectory);
 
-        // protect against copying a dir into itself
         if (sourceInfo.isDir()){
             QString sourceAbsolute = QDir::cleanPath(sourceInfo.absoluteFilePath());
             QString destinationAbsolute = QDir::cleanPath(QFileInfo(destinationPath).absoluteFilePath());
 
             if (destinationAbsolute == sourceAbsolute || destinationAbsolute.startsWith(sourceAbsolute + "/")){
-                QMessageBox::warning(this, "Paste Failed", "A directory cannot be copied inside itself");
+                QMessageBox::warning(this, "Copy Failed", "A directory cannot be copied inside itself");
                 continue;
             }
 
         }
-        
-        // Perform the copy and invalidate directory totals only when the
-        // destination was created successfully.
+
         if (!copyRecursively(sourcePath, destinationPath)){
             QMessageBox::warning(
                 this,
-                "Paste Failed",
-                QString("Could not copy:\n%1").arg((sourcePath)));   
+                "Copy Failed",
+                QString("Could not copy:\n%1").arg((sourcePath)));
         } else {
-            // The destination and all cached ancestors may now have different
-            // totals. The model also clears cached descendants when needed.
             fileModel->invalidatePaths({destinationPath});
         }
     }
-
-
 }
 
 bool MainWindow::copyRecursively(const QString &sourcePath, const QString &destinationPath) {
@@ -966,11 +988,16 @@ void MainWindow::renameSelectedItem(
     QWidget *page
 )
 {
-    TabState &state =
-        tabStates[page];
+    QTreeView *fileTreeView =
+        fileTreeForPage(page);
+
+    if (fileTreeView == nullptr)
+    {
+        return;
+    }
 
     QStringList paths =
-        selectedFilePaths(state.fileTreeView);
+        selectedFilePaths(fileTreeView);
 
     if (paths.size() != 1)
     {
@@ -1088,11 +1115,16 @@ void MainWindow::deleteSelectedItems(
     QWidget *page
 )
 {
-    TabState &state =
-        tabStates[page];
+    QTreeView *fileTreeView =
+        fileTreeForPage(page);
+
+    if (fileTreeView == nullptr)
+    {
+        return;
+    }
 
     QStringList paths =
-        selectedFilePaths(state.fileTreeView);
+        selectedFilePaths(fileTreeView);
 
     if (paths.isEmpty())
     {

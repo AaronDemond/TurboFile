@@ -2,14 +2,17 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include <QString>
-#include <QStringList>
 #include <QHash>
+#include <QList>
 #include <QMainWindow>
 #include <QPoint>
+#include <QString>
+#include <QStringList>
+#include <QUrl>
 
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
+class BrowserPane;
 class DirectorySizeSortProxyModel;
 // Window-level pinned-directory panel (not per-tab).
 class PinnedSidebar;
@@ -45,14 +48,13 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
-    // Stores the per-tab widgets and history needed for navigation buttons.
+    // One browser tab: a horizontal splitter of independent BrowserPane
+    // explorers. History, path bar, and tree live on each pane, not here.
+    // activePane is the explorer that receives pin clicks and file actions.
     struct TabState {
-        QTreeView *fileTreeView = nullptr;
-        QLineEdit *pathLineEdit = nullptr;
-        QPushButton *backButton = nullptr;
-        QPushButton *forwardButton = nullptr;
-        QStringList history;
-        int historyIndex = -1;
+        QSplitter *paneSplitter = nullptr;
+        QList<BrowserPane *> panes;
+        BrowserPane *activePane = nullptr;
     };
 
     // The widgets generated from mainwindow.ui.
@@ -91,33 +93,45 @@ private:
     // Adds the trailing new-tab control to the tab bar.
     void setupNewTabButton();
 
-    // Connects the signals for one browser tab's widgets.
-    void setupTabConnections(
-        QWidget *page,
-        QPushButton *backButton,
-        QPushButton *forwardButton,
-        QPushButton *upButton,
-        QTreeView *fileTreeView
+    // Create a pane, attach the shared model, and wire its signals.
+    BrowserPane *createBrowserPane(QWidget *page);
+
+    // Connect activation, split/close, drops, and the file-view actions.
+    void setupPaneConnections(QWidget *page, BrowserPane *pane);
+
+    // Split shows only on a single pane; Close shows only when two exist.
+    void updatePaneChrome(QWidget *page);
+
+    // Add a second explorer beside the existing one, starting at the
+    // active pane's path. No-op when the tab already has two panes.
+    void splitPane(QWidget *page);
+
+    // Destroy one explorer. The last pane in a tab cannot be closed.
+    void closePane(QWidget *page, BrowserPane *pane);
+
+    // Remember which pane should receive pin clicks and file actions.
+    void setActivePane(QWidget *page, BrowserPane *pane);
+
+    // Tree belonging to the tab's active pane, or null if the tab is gone.
+    QTreeView *fileTreeForPage(QWidget *page) const;
+
+    // Copy dropped or pasted URLs into dest using copyRecursively.
+    void copyUrlsIntoDirectory(
+        const QList<QUrl> &urls,
+        const QString &destinationDirectory
     );
+
+    // Persist every tab's pane paths, histories, and splitter sizes.
+    void saveSession() const;
+
+    // Recreate tabs from QSettings. Returns false when nothing was stored.
+    bool restoreSession();
 
     // --------------------------------------------
     // Navigation
     // --------------------------------------------
 
-
-    // Navigate to the path manually entered in the path bar.
-    void navigateFromPathBar(QWidget *page);
-
-    // Move one level upward in the current filesystem view.
-    void goUp(QWidget *page);
-
-    // Move backward in the current tab's browsing history.
-    void goBack(QWidget *page);
-
-    // Move forward in the current tab's browsing history.
-    void goForward(QWidget *page);
-
-    // Moves the tab view to a directory and optionally records it in history.
+    // Moves the active pane to a directory and optionally records history.
     void navigateTo(QWidget *page, const QString &path, bool addToHistory = true);
 
     void openDirectory(QWidget *page, const QModelIndex &index);
@@ -128,11 +142,8 @@ private:
     // State change
     // -----------------------------------------------------
 
-    // Updates the visible tab text based on the current directory name.
+    // Updates the visible tab text based on the left pane's directory name.
     void updateTabTitle(QWidget *page, const QString &path);
-
-    // Enables or disables the Back and Forward buttons based on history state.
-    void updateNavigationButtons(QWidget *page);
 
     // ------------------------------------------------------
     // Actions

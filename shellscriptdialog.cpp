@@ -3,17 +3,28 @@
 #include <QCloseEvent>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QSyntaxHighlighter>
 #include <QTextCharFormat>
 #include <QTextCursor>
+#include <QTimer>
 #include <QVBoxLayout>
+
+#ifdef Q_OS_UNIX
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -144,7 +155,16 @@ ShellScriptDialog::ShellScriptDialog(
 {
     setWindowTitle("Run Shell Script Here");
     resize(860, 680);
-    setModal(true);
+
+    // This editor is a separate top-level window rather than a modal child.
+    // The user can move it independently and continue navigating, selecting,
+    // or resizing the explorer while the script window remains open.
+    setWindowFlag(Qt::Window, true);
+    setModal(false);
+
+    // MainWindow creates this dialog on the heap. Deleting it when the window
+    // closes prevents modeless editor instances from accumulating in memory.
+    setAttribute(Qt::WA_DeleteOnClose);
 
     auto *layout = new QVBoxLayout(this);
 
@@ -191,12 +211,25 @@ ShellScriptDialog::ShellScriptDialog(
     outputView->setMaximumBlockCount(10000);
     layout->addWidget(outputView, 2);
 
+    // Save is an explicit action and never appears automatically during Run
+    // or Close. The small status label reports its result inline so saving
+    // does not add another success or error message box to the user's flow.
+    saveStatusLabel = new QLabel(this);
+    saveStatusLabel->setTextInteractionFlags(
+        Qt::TextSelectableByMouse
+    );
+    layout->addWidget(saveStatusLabel);
+
     // Standard dialog buttons retain native keyboard and platform behavior.
     // Stop begins disabled because no child process exists initially.
     auto *buttonBox = new QDialogButtonBox(this);
     runButton = buttonBox->addButton(
         "Run",
         QDialogButtonBox::AcceptRole
+    );
+    saveButton = buttonBox->addButton(
+        "Save Script",
+        QDialogButtonBox::ActionRole
     );
     stopButton = buttonBox->addButton(
         "Stop",
@@ -213,6 +246,12 @@ ShellScriptDialog::ShellScriptDialog(
         &QPushButton::clicked,
         this,
         &ShellScriptDialog::runScript
+    );
+    connect(
+        saveButton,
+        &QPushButton::clicked,
+        this,
+        &ShellScriptDialog::saveScript
     );
     connect(
         stopButton,
@@ -359,7 +398,21 @@ void ShellScriptDialog::runScript()
 
     outputView->clear();
     failedToStart = false;
+    stopRequested = false;
+    closeWhenFinished = false;
     setRunning(true);
+
+    // On Unix, make Bash the leader of a new process group before exec().
+    // Stop can then signal Bash and ordinary child commands together instead
+    // of leaving a long-running child behind after its parent exits.
+#ifdef Q_OS_UNIX
+    process->setChildProcessModifier(
+        []()
+        {
+            ::setpgid(0, 0);
+        }
+    );
+#endif
 
     // Passing the complete editor text as one -c argument avoids temporary
     // executable files and shell-escaping problems. QProcess supplies the
@@ -370,29 +423,153 @@ void ShellScriptDialog::runScript()
         bashExecutable,
         {
             "-c",
-            script
+            script.endsWith('\n')
+                ? script
+                : script + '\n'
         }
     );
     process->closeWriteChannel();
 }
 
+void ShellScriptDialog::saveScript()
+{
+    // Reuse the last chosen path for subsequent saves. The first click opens
+    // a normal Save dialog rooted in the script's working directory; no save
+    // prompt is ever shown automatically when running or closing the editor.
+    QString destinationPath = savedFilePath;
+
+    if (destinationPath.isEmpty())
+    {
+        destinationPath =
+            QFileDialog::getSaveFileName(
+                this,
+                "Save Shell Script",
+                QDir(workingDirectory).filePath("script.sh"),
+                "Shell scripts (*.sh);;All files (*)"
+            );
+    }
+
+    // Cancelling the chooser is a normal continuation of editing, so leave
+    // the existing status text and script contents untouched.
+    if (destinationPath.isEmpty())
+    {
+        return;
+    }
+
+    // QSaveFile writes to a temporary sibling and replaces the destination
+    // only after commit succeeds. A disk-full or interrupted write therefore
+    // cannot leave behind a partially written shell script.
+    QSaveFile outputFile(destinationPath);
+
+    if (!outputFile.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        saveStatusLabel->setStyleSheet("color: #e06c75;");
+        saveStatusLabel->setText(
+            QString("Save failed: %1")
+                .arg(outputFile.errorString())
+        );
+        return;
+    }
+
+    QByteArray scriptBytes =
+        scriptEditor->toPlainText().toUtf8();
+
+    if (
+        outputFile.write(scriptBytes) != scriptBytes.size() ||
+        !outputFile.commit()
+    )
+    {
+        saveStatusLabel->setStyleSheet("color: #e06c75;");
+        saveStatusLabel->setText(
+            QString("Save failed: %1")
+                .arg(outputFile.errorString())
+        );
+        return;
+    }
+
+    savedFilePath = destinationPath;
+
+    // Mark the saved file executable for its owner while preserving the
+    // read/write permissions selected by the platform or existing file.
+    QFile::setPermissions(
+        destinationPath,
+        QFile::permissions(destinationPath) |
+            QFileDevice::ExeOwner
+    );
+
+    saveStatusLabel->setStyleSheet("color: #98c379;");
+    saveStatusLabel->setText(
+        QString("Saved: %1")
+            .arg(QFileInfo(destinationPath).fileName())
+    );
+
+    // The receiver may no longer exist because this modeless editor can
+    // outlive the explorer. Qt automatically discards that disconnected case.
+    emit scriptSaved(destinationPath);
+}
+
 void ShellScriptDialog::stopScript()
 {
-    if (process->state() == QProcess::NotRunning)
+    if (
+        process->state() == QProcess::NotRunning ||
+        stopRequested
+    )
     {
         return;
     }
 
     appendOutput("\n[Stopping script...]\n", true);
-    process->terminate();
+    stopRequested = true;
+    stopButton->setEnabled(false);
 
-    // terminate() gives Bash and its traps a brief opportunity to clean up.
-    // kill() guarantees the dialog does not remain locked indefinitely.
-    if (!process->waitForFinished(1500))
+    // Store the current PID in the delayed callback. If this process finishes
+    // and another run starts before the timeout, the old timer must never kill
+    // the newer Bash process.
+    qint64 processId = process->processId();
+
+#ifdef Q_OS_UNIX
+    // A negative PID addresses the process group created in runScript(). If
+    // group signaling unexpectedly fails, terminate the Bash process itself.
+    if (
+        processId <= 0 ||
+        ::kill(-static_cast<pid_t>(processId), SIGTERM) != 0
+    )
     {
-        process->kill();
-        process->waitForFinished(1500);
+        process->terminate();
     }
+#else
+    process->terminate();
+#endif
+
+    // Give Bash and its traps a brief opportunity to clean up without calling
+    // waitForFinished(), which would freeze the GUI thread. The context-bound
+    // single-shot callback is discarded automatically if the dialog closes.
+    QTimer::singleShot(
+        1500,
+        this,
+        [this, processId]()
+        {
+            if (
+                process->state() == QProcess::NotRunning ||
+                process->processId() != processId
+            )
+            {
+                return;
+            }
+
+#ifdef Q_OS_UNIX
+            if (
+                processId <= 0 ||
+                ::kill(-static_cast<pid_t>(processId), SIGKILL) != 0
+            )
+            {
+                process->kill();
+            }
+#else
+            process->kill();
+#endif
+        }
+    );
 }
 
 void ShellScriptDialog::appendOutput(
@@ -461,6 +638,18 @@ void ShellScriptDialog::handleFinished(
         return;
     }
 
+    // A user-requested stop is not a script error. If Stop came from a close
+    // confirmation, finish destroying the dialog only after QProcess confirms
+    // that Bash and the signaled process group have exited.
+    if (stopRequested)
+    {
+        if (closeWhenFinished)
+        {
+            QDialog::reject();
+        }
+        return;
+    }
+
     if (
         exitStatus == QProcess::NormalExit &&
         exitCode == 0
@@ -510,6 +699,9 @@ bool ShellScriptDialog::confirmStopBeforeClose()
         return false;
     }
 
+    // Keep the dialog alive while termination completes asynchronously. The
+    // finished handler performs the requested close after QProcess is idle.
+    closeWhenFinished = true;
     stopScript();
-    return true;
+    return false;
 }

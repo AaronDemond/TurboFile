@@ -55,10 +55,12 @@ void MainWindow::configureFileTreeView (
         QAbstractItemView::SelectRows
     );
 
-    // DragOnly so the tree is a source for pinning directories, not a
-    // drop target that would move files. QFileSystemModel supplies file:// URLs.
+    // DragDrop so a pane can receive copies from the other pane while still
+    // acting as a drag source for pinning. BrowserFileTreeView intercepts
+    // dropEvent and never lets QFileSystemModel move files.
     fileTreeView->setDragEnabled(true);
-    fileTreeView->setDragDropMode(QAbstractItemView::DragOnly);
+    fileTreeView->setAcceptDrops(true);
+    fileTreeView->setDragDropMode(QAbstractItemView::DragDrop);
     fileTreeView->setDefaultDropAction(Qt::CopyAction);
 }
 

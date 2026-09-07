@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "browser/browserconstants.h"
+#include "browser/browserpane.h"
 
 #include <QFileSystemModel>
 #include <QDir>
@@ -12,11 +14,13 @@
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTabBar>
 
 #include <QShortcut>
 #include <QKeySequence>
+#include <QUrl>
 
 // Add a permanent trailing tab that acts as the new-tab button.
 void MainWindow::setupNewTabButton()
@@ -106,69 +110,50 @@ void MainWindow::setupNewTabButton()
     );
 }
 
-// Build a single browser tab with its own layout, widgets, and tab state.
+// Build a tab that starts with one independent explorer pane. A second
+// pane is added later through BrowserPane::splitRequested, not here.
 void MainWindow::createTab(const QString &path)
 {
-    // QWidget acts as the container for everything displayed in a single tab.
     auto *page = new QWidget();
-
-    // Vertical layout: navigation bar at the top, file tree below it.
     auto *mainLayout = new QVBoxLayout(page);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
 
-    // Horizontal navigation bar: Back | Forward | Up | path.
-    auto *topLayout = new QHBoxLayout();
+    // Horizontal splitter holds one or two BrowserPane widgets. Children
+    // are not collapsible so a pane cannot be dragged away; Close is the
+    // only way to remove the extra explorer.
+    auto *splitter = new QSplitter(Qt::Horizontal, page);
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(kPaneSplitterHandleWidth);
+    splitter->setStyleSheet(
+        QStringLiteral(
+            "QSplitter::handle:horizontal {"
+            "  width: %1px;"
+            "}"
+            "QSplitter::handle:horizontal:hover {"
+            "  background-color: palette(mid);"
+            "}"
+        ).arg(kPaneSplitterHandleWidth)
+    );
 
-    // Create the controls that make up the tab's browser UI.
-    auto *backButton = new QPushButton("<", page);
-    auto *forwardButton = new QPushButton(">", page);
-    auto *upButton = new QPushButton("Up", page);
-    auto *pathLineEdit = new QLineEdit(page);
-
-    // button styling
-    QString buttonStyle =
-        "QPushButton { background-color: orange; color: black; border: 1px solid black; }"
-        "QPushButton:hover { background-color: green; }"
-        "QPushButton:pressed { background-color: red }"
-        "QPushButton:disabled {background-color: grey; color: black; border: 1px solid black}";
-    backButton->setFixedSize(32, 28);
-    forwardButton->setFixedSize(32, 28);
-    upButton->setFixedSize(50, 28);
-    upButton->setStyleSheet(buttonStyle);
-
-
-
-    // Generate the file tree vie used by the page
-    auto *fileTreeView = new QTreeView(page);
-    configureFileTreeView(fileTreeView);
-    fileTreeView->setContextMenuPolicy(Qt::CustomContextMenu);
-
-
-    // Place the navigation controls above the file tree.
-    topLayout->addWidget(backButton);
-    topLayout->addWidget(forwardButton);
-    topLayout->addWidget(upButton);
-    topLayout->addWidget(pathLineEdit);
-
-    mainLayout->addLayout(topLayout);
-    mainLayout->addWidget(fileTreeView);
-
-
-    // Save the per-tab widgets and history state before navigation begins.
     TabState state;
-    state.fileTreeView = fileTreeView;
-    state.pathLineEdit = pathLineEdit;
-    state.backButton = backButton;
-    state.forwardButton = forwardButton;
-
+    state.paneSplitter = splitter;
     tabStates[page] = state;
 
-    // Find the trailing plus placeholder at its current index. Its index can
-    // change when users reorder existing tabs, so it must be looked up here.
+    BrowserPane *pane = createBrowserPane(page);
+    splitter->addWidget(pane);
+    splitter->setStretchFactor(0, 1);
+
+    tabStates[page].panes.append(pane);
+    tabStates[page].activePane = pane;
+    updatePaneChrome(page);
+
+    mainLayout->addWidget(splitter);
+
+    pane->navigateTo(path);
+
     int newTabIndex =
         ui->tabWidget->indexOf(newTabPlaceholder);
 
-    // Insert the browser tab directly before the plus placeholder. This keeps
-    // the plus control immediately to the right of every open browser tab.
     int tabIndex =
         ui->tabWidget->insertTab(
             newTabIndex,
@@ -176,110 +161,182 @@ void MainWindow::createTab(const QString &path)
             ""
         );
 
-    navigateTo(page, path);
     ui->tabWidget->setCurrentIndex(tabIndex);
-
-    // Connect all of the user interactions for this tab.
-    setupTabConnections(
-        page,
-        backButton,
-        forwardButton,
-        upButton,
-        fileTreeView
-    );
+    updateTabTitle(page, pane->currentPath());
 }
 
-// Connect the relevant signals for a single browser tab.
-void MainWindow::setupTabConnections(
-    QWidget *page,
-    QPushButton *backButton,
-    QPushButton *forwardButton,
-    QPushButton *upButton,
-    QTreeView *fileTreeView
-)
+// Shared construction for the first pane and for a later split pane.
+// configureFileTreeView attaches the window-wide proxy so both panes
+// share one size cache instead of walking the disk twice.
+BrowserPane *MainWindow::createBrowserPane(QWidget *page)
 {
-    // Double-clicking a directory should open it in the current tab.
+    auto *pane = new BrowserPane(fileModel, page);
+    configureFileTreeView(pane->fileTreeView());
+    pane->fileTreeView()->setContextMenuPolicy(Qt::CustomContextMenu);
+    setupPaneConnections(page, pane);
+    return pane;
+}
+
+void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
+{
+    connect(
+        pane,
+        &BrowserPane::activated,
+        this,
+        [this, page, pane]()
+        {
+            setActivePane(page, pane);
+        }
+    );
+
+    connect(
+        pane,
+        &BrowserPane::splitRequested,
+        this,
+        [this, page]()
+        {
+            splitPane(page);
+        }
+    );
+
+    connect(
+        pane,
+        &BrowserPane::closeRequested,
+        this,
+        [this, page, pane]()
+        {
+            closePane(page, pane);
+        }
+    );
+
+    // Tab titles follow the left pane only so browsing in the right pane
+    // does not rename the tab out from under the user.
+    connect(
+        pane,
+        &BrowserPane::pathChanged,
+        this,
+        [this, page, pane](const QString &path)
+        {
+            if (tabStates.value(page).panes.value(0) == pane)
+            {
+                updateTabTitle(page, path);
+            }
+        }
+    );
+
+    connect(
+        pane,
+        &BrowserPane::filesDropped,
+        this,
+        [this](const QList<QUrl> &urls, const QString &destination)
+        {
+            copyUrlsIntoDirectory(urls, destination);
+        }
+    );
+
+    QTreeView *fileTreeView = pane->fileTreeView();
+
     connect(
         fileTreeView,
         &QTreeView::doubleClicked,
-        page,
-        [this, page](const QModelIndex &index)
+        this,
+        [this, page, pane](const QModelIndex &index)
         {
+            setActivePane(page, pane);
             openItem(page, index);
         }
     );
 
-    // Going up navigates to the parent directory of the current view.
     connect(
-        upButton,
-        &QPushButton::clicked,
-        page,
-        [this, page]()
-        {
-            goUp(page);
-        }
-    );
-
-    // Back steps through the current tab's history in reverse chronological order.
-    connect(
-        backButton,
-        &QPushButton::clicked,
-        page,
-        [this, page]()
-        {
-            goBack(page);
-        }
-    );
-
-    // Forward steps forward through the current tab's history.
-    connect(
-        forwardButton,
-        &QPushButton::clicked,
-        page,
-        [this, page]()
-        {
-            goForward(page);
-        }
-    );
-
-
-    // -----------------------
-    // PATH BAR
-    // -----------------------
-
-    // Get path bar belonging to this tab
-    // Press enter while editing the path bar should trigger navigation.
-
-    QLineEdit *pathLineEdit = tabStates[page].pathLineEdit;
-
-    // QLineEdit emites returnPressed signal when the user presses Enter.
-    connect(
-        pathLineEdit,
-        &QLineEdit::returnPressed,
-        page,
-        [this, page]()
-        {
-            navigateFromPathBar(page);
-        }
-    );
-
-   // ---------------------------------------------------  
-   // FILE CONTEXT MENU
-   // ---------------------------------------------------
-
-   // This signal fires when a user right clicks inside the QTreeView
-   connect(
         fileTreeView,
         &QTreeView::customContextMenuRequested,
         this,
-        [this, page] (const QPoint &position) {
-            showFileContextMenu(
-                page,
-                position
-            );
+        [this, page, pane](const QPoint &position)
+        {
+            setActivePane(page, pane);
+            showFileContextMenu(page, position);
         }
-   );
+    );
+}
 
+void MainWindow::updatePaneChrome(QWidget *page)
+{
+    const TabState &state = tabStates[page];
+    const bool canSplit = state.panes.size() < kMaxPanesPerTab;
+    const bool canClose = state.panes.size() > 1;
+
+    for (BrowserPane *pane : state.panes)
+    {
+        pane->setSplitButtonVisible(canSplit);
+        pane->setCloseButtonVisible(canClose);
+    }
+}
+
+void MainWindow::splitPane(QWidget *page)
+{
+    TabState &state = tabStates[page];
+    if (state.panes.size() >= kMaxPanesPerTab)
+    {
+        return;
+    }
+
+    const QString startPath =
+        state.activePane != nullptr
+            ? state.activePane->currentPath()
+            : QDir::homePath();
+
+    BrowserPane *pane = createBrowserPane(page);
+    state.paneSplitter->addWidget(pane);
+    state.paneSplitter->setStretchFactor(state.panes.size(), 1);
+    state.panes.append(pane);
+    pane->navigateTo(startPath);
+    setActivePane(page, pane);
+    updatePaneChrome(page);
+
+    const int total = qMax(state.paneSplitter->width(), 2);
+    const int each = total / 2;
+    state.paneSplitter->setSizes({each, total - each});
+}
+
+void MainWindow::closePane(QWidget *page, BrowserPane *pane)
+{
+    TabState &state = tabStates[page];
+    if (state.panes.size() <= 1)
+    {
+        return;
+    }
+
+    state.panes.removeAll(pane);
+    if (state.activePane == pane)
+    {
+        state.activePane = state.panes.first();
+    }
+
+    pane->deleteLater();
+    updatePaneChrome(page);
+    updateTabTitle(page, state.panes.first()->currentPath());
+}
+
+void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
+{
+    auto it = tabStates.find(page);
+    if (it == tabStates.end())
+    {
+        return;
+    }
+
+    it->activePane = pane;
+}
+
+QTreeView *MainWindow::fileTreeForPage(QWidget *page) const
+{
+    auto it = tabStates.constFind(page);
+    if (it == tabStates.constEnd() || it->activePane == nullptr)
+    {
+        return nullptr;
+    }
+
+    return it->activePane->fileTreeView();
 }
 
 // Update the tab label to match the name of the directory currently displayed.

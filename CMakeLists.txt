@@ -28,6 +28,13 @@ qt_add_executable(TurboFIle
     shellscriptdialog.cpp
     shellscriptdialog.h
 
+    # Per-tab split-pane file explorers.
+    browser/browserpane.cpp
+    browser/browserpane.h
+    browser/browserfiletreeview.cpp
+    browser/browserfiletreeview.h
+    browser/browserconstants.h
+
     # Window-level pinned-directory sidebar.
     sidebar/pinnedsidebar.cpp
     sidebar/pinnedsidebar.h
@@ -42,6 +49,13 @@ qt_add_executable(TurboFIle
     sidebar/pincolorpresets.h
     mainwindow.h
     mainwindow.ui
+)
+
+# Nested sources such as browser/browserpane.cpp include project-root
+# headers by quoted name. Without this, those compiles only see browser/.
+target_include_directories(TurboFIle
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(TurboFIle

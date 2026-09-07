@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "browser/browserconstants.h"
+#include "browser/browserpane.h"
 #include "directorysizesortproxymodel.h"
 #include "sidebar/pinnedconstants.h"
 #include "sidebar/pinnedsidebar.h"
@@ -18,9 +20,12 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 // Splitter holds the pinned sidebar and the tab widget.
+#include <QByteArray>
 #include <QCloseEvent>
+#include <QList>
 #include <QSplitter>
 #include <QSettings>
+#include <QStringList>
 #include <QTimer>
 
 // The UI contains this widget, which manages the browser tabs.
@@ -55,8 +60,12 @@ MainWindow::MainWindow(QWidget *parent)
     // Create the permanent trailing plus tab before adding browser tabs.
     setupNewTabButton();
 
-    // Every window starts with one tab rooted at the home directory.
-    createTab(QDir::homePath());
+    // Recreate the previous session's tabs and panes. First run, or a
+    // corrupt/empty session, still opens a single home-directory tab.
+    if (!restoreSession())
+    {
+        createTab(QDir::homePath());
+    }
 
     // Ctrl+T creates another home-directory browser tab.
     auto *newTabShortcut = new QShortcut(QKeySequence("Ctrl+T"), this);
@@ -151,7 +160,7 @@ void MainWindow::setupSidebar()
             false
         ).toBool();
 
-    // Clicking a pin navigates the current browser tab only.
+    // Clicking a pin navigates the current tab's active pane only.
     connect(
         pinnedSidebar,
         &PinnedSidebar::directoryActivated,
@@ -255,7 +264,177 @@ void MainWindow::closeEvent(QCloseEvent *event)
         sidebarLayoutSaveTimer->stop();
     }
     saveSidebarLayout();
+    saveSession();
     QMainWindow::closeEvent(event);
+}
+
+// Walk tabs in visual order so restore recreates the same left-to-right
+// sequence. The plus placeholder is a control, not a saved browser tab.
+void MainWindow::saveSession() const
+{
+    QSettings settings(
+        QStringLiteral("TurboFile"),
+        QStringLiteral("TurboFile")
+    );
+
+    settings.remove(QStringLiteral("session/tabs"));
+
+    int written = 0;
+    settings.beginWriteArray(QStringLiteral("session/tabs"));
+
+    const int tabCount = ui->tabWidget->count();
+    int savedCurrent = 0;
+
+    for (int i = 0; i < tabCount; ++i)
+    {
+        QWidget *page = ui->tabWidget->widget(i);
+        if (page == nullptr || page == newTabPlaceholder)
+        {
+            continue;
+        }
+
+        auto it = tabStates.constFind(page);
+        if (it == tabStates.constEnd() || it->panes.isEmpty())
+        {
+            continue;
+        }
+
+        if (page == ui->tabWidget->currentWidget())
+        {
+            savedCurrent = written;
+        }
+
+        settings.setArrayIndex(written);
+        settings.setValue(
+            QStringLiteral("splitter"),
+            it->paneSplitter != nullptr
+                ? it->paneSplitter->saveState()
+                : QByteArray()
+        );
+
+        settings.beginWriteArray(QStringLiteral("panes"));
+        for (int p = 0; p < it->panes.size(); ++p)
+        {
+            BrowserPane *pane = it->panes.at(p);
+            settings.setArrayIndex(p);
+            settings.setValue(QStringLiteral("path"), pane->currentPath());
+            settings.setValue(QStringLiteral("history"), pane->history());
+            settings.setValue(QStringLiteral("historyIndex"), pane->historyIndex());
+        }
+        settings.endArray();
+
+        ++written;
+    }
+
+    settings.endArray();
+    settings.setValue(QStringLiteral("session/currentTab"), savedCurrent);
+}
+
+bool MainWindow::restoreSession()
+{
+    QSettings settings(
+        QStringLiteral("TurboFile"),
+        QStringLiteral("TurboFile")
+    );
+
+    const int tabCount =
+        settings.beginReadArray(QStringLiteral("session/tabs"));
+
+    if (tabCount <= 0)
+    {
+        settings.endArray();
+        return false;
+    }
+
+    QList<QWidget *> restoredPages;
+
+    for (int i = 0; i < tabCount; ++i)
+    {
+        settings.setArrayIndex(i);
+
+        const QByteArray splitterState =
+            settings.value(QStringLiteral("splitter")).toByteArray();
+
+        const int paneCount =
+            settings.beginReadArray(QStringLiteral("panes"));
+
+        struct SavedPane
+        {
+            QString path;
+            QStringList history;
+            int historyIndex = -1;
+        };
+        QList<SavedPane> savedPanes;
+
+        for (int p = 0; p < paneCount && p < kMaxPanesPerTab; ++p)
+        {
+            settings.setArrayIndex(p);
+            SavedPane saved;
+            saved.path = settings.value(QStringLiteral("path")).toString();
+            saved.history =
+                settings.value(QStringLiteral("history")).toStringList();
+            saved.historyIndex =
+                settings.value(QStringLiteral("historyIndex"), -1).toInt();
+            if (saved.path.isEmpty())
+            {
+                saved.path = QDir::homePath();
+            }
+            savedPanes.append(saved);
+        }
+        settings.endArray();
+
+        if (savedPanes.isEmpty())
+        {
+            continue;
+        }
+
+        createTab(savedPanes.first().path);
+        QWidget *page = ui->tabWidget->currentWidget();
+        if (page == nullptr || page == newTabPlaceholder)
+        {
+            continue;
+        }
+
+        TabState &state = tabStates[page];
+        state.panes.first()->restoreSession(
+            savedPanes.first().path,
+            savedPanes.first().history,
+            savedPanes.first().historyIndex
+        );
+
+        if (savedPanes.size() > 1)
+        {
+            splitPane(page);
+            state.panes.last()->restoreSession(
+                savedPanes.at(1).path,
+                savedPanes.at(1).history,
+                savedPanes.at(1).historyIndex
+            );
+        }
+
+        if (!splitterState.isEmpty() && state.paneSplitter != nullptr)
+        {
+            state.paneSplitter->restoreState(splitterState);
+        }
+
+        restoredPages.append(page);
+    }
+
+    settings.endArray();
+
+    if (restoredPages.isEmpty())
+    {
+        return false;
+    }
+
+    const int current =
+        settings.value(QStringLiteral("session/currentTab"), 0).toInt();
+    if (current >= 0 && current < restoredPages.size())
+    {
+        ui->tabWidget->setCurrentWidget(restoredPages.at(current));
+    }
+
+    return true;
 }
 
 // The UI object is allocated manually because it is generated at build time.
