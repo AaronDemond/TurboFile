@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QHash>
 #include <QMainWindow>
+#include <QPoint>
 
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
@@ -15,6 +16,7 @@ class QTreeView;
 class QLineEdit;
 class QPushButton;
 class QModelIndex;
+class QPoint;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -65,8 +67,10 @@ private:
         QTreeView *fileTreeView
     );
 
-    // Open a selected directory in the current tab.
-    void openDirectory(QWidget *page, const QModelIndex &index);
+    // --------------------------------------------
+    // Navigation
+    // --------------------------------------------
+
 
     // Navigate to the path manually entered in the path bar.
     void navigateFromPathBar(QWidget *page);
@@ -80,15 +84,78 @@ private:
     // Move forward in the current tab's browsing history.
     void goForward(QWidget *page);
 
-    // Updates the visible tab text based on the current directory name.
-    void updateTabTitle(QWidget *page, const QString &path);
-
     // Moves the tab view to a directory and optionally records it in history.
     void navigateTo(QWidget *page, const QString &path, bool addToHistory = true);
+
+    void openDirectory(QWidget *page, const QModelIndex &index);
+
+
+
+    // -----------------------------------------------------
+    // State change
+    // -----------------------------------------------------
+
+    // Updates the visible tab text based on the current directory name.
+    void updateTabTitle(QWidget *page, const QString &path);
 
     // Enables or disables the Back and Forward buttons based on history state.
     void updateNavigationButtons(QWidget *page);
 
+    // ------------------------------------------------------
+    // Actions
+    // -------------------------------------------------------
+
+    // Show the right-click menu for the file view.
+    void showFileContextMenu(
+        QWidget *page,
+        const QPoint &position
+    );
+
+    // Open a directory in TurboFile or open a file
+    // using the desktop's default application.
+    void openItem(
+        QWidget *page,
+        const QModelIndex &index
+    );
+
+    // Put a filesystem item onto the real desktop clipboard.
+    void copyItemToClipboard(
+        const QModelIndex &index
+    );
+
+    // Copy filesystem items from the clipboard
+    // into this tab's current directory.
+    void pasteClipboardItems(
+        QWidget *page
+    );
+
+    // Rename a file or directory.
+    void renameItem(
+        const QModelIndex &index
+    );
+
+    // Move a file or directory to the Trash.
+    void deleteItem(
+        const QModelIndex &index
+    );
+
+    // Recursively copy either a file or directory.
+    bool copyRecursively(
+        const QString &sourcePath,
+        const QString &destinationPath
+    );
+
+    // Generate a destination name that doesn't overwrite
+    // something that already exists.
+    QString makeUniqueCopyPath(
+        const QString &sourcePath,
+        const QString &destinationDirectory
+    ); 
+
+    // Column sort
+    void configureFileTreeView(
+        QTreeView *fileTreeView
+    );
 };
 
 #endif // MAINWINDOW_H

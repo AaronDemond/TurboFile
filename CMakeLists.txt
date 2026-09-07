@@ -11,6 +11,8 @@ qt_add_executable(TurboFIle
     mainwindow.cpp
     mainwindow_navigation.cpp
     mainwindow_tabs.cpp
+    mainwindow_fileactions.cpp
+    mainwindow_fileview.cpp
     mainwindow.h
     mainwindow.ui
 )

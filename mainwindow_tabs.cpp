@@ -16,6 +16,7 @@
 
 #include <QShortcut>
 #include <QKeySequence>
+#include <qtreeview.h>
 
 // Build a single browser tab with its own layout, widgets, and tab state.
 void MainWindow::createTab(const QString &path)
@@ -34,7 +35,6 @@ void MainWindow::createTab(const QString &path)
     auto *forwardButton = new QPushButton(">", page);
     auto *upButton = new QPushButton("Up", page);
     auto *pathLineEdit = new QLineEdit(page);
-    auto *fileTreeView = new QTreeView(page);
 
     // button styling
     QString buttonStyle =
@@ -48,6 +48,13 @@ void MainWindow::createTab(const QString &path)
     upButton->setStyleSheet(buttonStyle);
 
 
+
+    // Generate the file tree vie used by the page
+    auto *fileTreeView = new QTreeView(page);
+    configureFileTreeView(fileTreeView);
+    fileTreeView->setContextMenuPolicy(Qt::CustomContextMenu);
+
+
     // Place the navigation controls above the file tree.
     topLayout->addWidget(backButton);
     topLayout->addWidget(forwardButton);
@@ -57,15 +64,6 @@ void MainWindow::createTab(const QString &path)
     mainLayout->addLayout(topLayout);
     mainLayout->addWidget(fileTreeView);
 
-    // All tabs share the same filesystem model so each view can show different roots.
-    fileTreeView->setModel(fileModel);
-
-    // set the default width of of the file columns
-    // 0 = Name, 1 = Size, 2 = Type, 3 = Date Modified
-    fileTreeView->setColumnWidth(0, 355);
-    fileTreeView->setColumnWidth(2, 100);
-    fileTreeView->setColumnWidth(3, 100);
-    fileTreeView->setColumnWidth(3, 170);
 
     // Save the per-tab widgets and history state before navigation begins.
     TabState state;
@@ -108,7 +106,7 @@ void MainWindow::setupTabConnections(
         page,
         [this, page](const QModelIndex &index)
         {
-            openDirectory(page, index);
+            openItem(page, index);
         }
     );
 
@@ -164,6 +162,23 @@ void MainWindow::setupTabConnections(
             navigateFromPathBar(page);
         }
     );
+
+   // ---------------------------------------------------  
+   // FILE CONTEXT MENU
+   // ---------------------------------------------------
+
+   // This signal fires when a user right clicks inside the QTreeView
+   connect(
+        fileTreeView,
+        &QTreeView::customContextMenuRequested,
+        this,
+        [this, page] (const QPoint &position) {
+            showFileContextMenu(
+                page,
+                position
+            );
+        }
+   );
 
 }
 
