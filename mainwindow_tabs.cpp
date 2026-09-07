@@ -13,10 +13,98 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QTabWidget>
+#include <QTabBar>
 
 #include <QShortcut>
 #include <QKeySequence>
-#include <qtreeview.h>
+
+// Add a permanent trailing tab that acts as the new-tab button.
+void MainWindow::setupNewTabButton()
+{
+    // The placeholder is a real tab page so it stays directly beside
+    // the rightmost browser tab instead of at the window's far edge.
+    newTabPlaceholder =
+        new QWidget(ui->tabWidget);
+
+    // Add the placeholder before any browser tabs are created.
+    // Browser tabs will always be inserted immediately before it.
+    int newTabIndex =
+        ui->tabWidget->addTab(
+            newTabPlaceholder,
+            "+"
+        );
+
+    // QTabWidget owns the QTabBar. We borrow its pointer to configure
+    // the placeholder's appearance and tab-specific interactions.
+    QTabBar *tabBar =
+        ui->tabWidget->tabBar();
+
+    // Explain the compact plus control when the user hovers over it.
+    tabBar->setTabToolTip(newTabIndex, "New tab");
+
+    // Closing the active rightmost browser tab should activate the
+    // previous browser tab instead of exposing the placeholder page.
+    tabBar->setSelectionBehaviorOnRemove(
+        QTabBar::SelectPreviousTab
+    );
+
+    // Tabs may place their close button on either side depending on
+    // the desktop style, so clear both positions for the placeholder.
+    tabBar->setTabButton(
+        newTabIndex,
+        QTabBar::LeftSide,
+        nullptr
+    );
+
+    tabBar->setTabButton(
+        newTabIndex,
+        QTabBar::RightSide,
+        nullptr
+    );
+
+    // Clicking the placeholder creates a normal home-directory tab.
+    // createTab() makes that new browser tab current immediately.
+    connect(
+        tabBar,
+        &QTabBar::tabBarClicked,
+        this,
+        [this](int index)
+        {
+            if (ui->tabWidget->widget(index) == newTabPlaceholder)
+            {
+                createTab(QDir::homePath());
+            }
+        }
+    );
+
+    // Browser tabs remain movable, but the plus placeholder must always
+    // return to the final position after any drag-and-drop reordering.
+    connect(
+        tabBar,
+        &QTabBar::tabMoved,
+        this,
+        [this](int, int)
+        {
+            // Find the placeholder again because moving tabs changes indexes.
+            int newTabIndex =
+                ui->tabWidget->indexOf(newTabPlaceholder);
+
+            // The final tab index is always one less than the tab count.
+            int lastIndex =
+                ui->tabWidget->count() - 1;
+
+            // Moving the placeholder to an already-correct position would
+            // emit another tabMoved signal, so only move it when necessary.
+            if (newTabIndex != lastIndex)
+            {
+                ui->tabWidget->tabBar()->moveTab(
+                    newTabIndex,
+                    lastIndex
+                );
+            }
+        }
+    );
+}
 
 // Build a single browser tab with its own layout, widgets, and tab state.
 void MainWindow::createTab(const QString &path)
@@ -74,8 +162,19 @@ void MainWindow::createTab(const QString &path)
 
     tabStates[page] = state;
 
-    // Add the tab to the UI and position it for the newly created page.
-    int tabIndex = ui->tabWidget->addTab(page, "");
+    // Find the trailing plus placeholder at its current index. Its index can
+    // change when users reorder existing tabs, so it must be looked up here.
+    int newTabIndex =
+        ui->tabWidget->indexOf(newTabPlaceholder);
+
+    // Insert the browser tab directly before the plus placeholder. This keeps
+    // the plus control immediately to the right of every open browser tab.
+    int tabIndex =
+        ui->tabWidget->insertTab(
+            newTabIndex,
+            page,
+            ""
+        );
 
     navigateTo(page, path);
     ui->tabWidget->setCurrentIndex(tabIndex);
@@ -142,6 +241,7 @@ void MainWindow::setupTabConnections(
             goForward(page);
         }
     );
+
 
     // -----------------------
     // PATH BAR

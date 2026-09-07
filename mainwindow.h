@@ -55,8 +55,14 @@ private:
     // Tracks the state for every browser tab, keyed by the tab page widget.
     QHash<QWidget *, TabState> tabStates;
 
+    // Placeholder tab that acts as the trailing new-tab button.
+    QWidget *newTabPlaceholder = nullptr;
+
     // Builds a new tab rooted at the supplied directory.
     void createTab(const QString &path);
+
+    // Adds the trailing new-tab control to the tab bar.
+    void setupNewTabButton();
 
     // Connects the signals for one browser tab's widgets.
     void setupTabConnections(

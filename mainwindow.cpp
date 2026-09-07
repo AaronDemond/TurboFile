@@ -39,6 +39,9 @@ MainWindow::MainWindow(QWidget *parent)
     ui->tabWidget->setTabsClosable(true);
     ui->tabWidget->setMovable(true);
 
+    // Create the permanent trailing plus tab before adding browser tabs.
+    setupNewTabButton();
+
     // Every window starts with one tab rooted at the home directory.
     createTab(QDir::homePath());
 
@@ -51,12 +54,20 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Delete a requested tab, while keeping one tab available at all times.
     connect(ui->tabWidget, &QTabWidget::tabCloseRequested, this, [this](int index) {
-        if (ui->tabWidget->count() == 1) {
+        // The count includes the plus placeholder, so two tabs means there
+        // is only one real browser tab left and it must remain open.
+        if (ui->tabWidget->count() <= 2) {
             return;
         }
 
         // Remove the page from the widget first, then safely destroy it.
         QWidget *page = ui->tabWidget->widget(index);
+
+        // The plus placeholder is a control, not a closable browser tab.
+        if (page == newTabPlaceholder) {
+            return;
+        }
+
         tabStates.remove(page);
         ui->tabWidget->removeTab(index);
         page->deleteLater();
