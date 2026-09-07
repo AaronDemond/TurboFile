@@ -2,6 +2,7 @@
 
 #include <QFileSystemModel>
 #include <QTreeView>
+#include <QItemSelectionModel>
 
 #include <QMenu>
 #include <QAction>
@@ -9,7 +10,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
-#include <QDirIterator>
 
 #include <QDesktopServices>
 #include <QUrl>
@@ -20,17 +20,7 @@
 
 #include <QInputDialog>
 #include <QMessageBox>
-#include <qabstractitemmodel.h>
-#include <qaction.h>
-#include <qapplication.h>
-#include <qdesktopservices.h>
-#include <qdir.h>
-#include <qfileinfo.h>
-#include <qlist.h>
-#include <qmessagebox.h>
-#include <qstringview.h>
-#include <qurl.h>
-#include <qwidget.h>
+#include <QLineEdit>
 
 
 // -------------------------------------------------
@@ -42,24 +32,46 @@ void MainWindow::showFileContextMenu(
     const QPoint &position
 )
 {
-    // Get the state belonging to this browser tab.
     TabState &state =
         tabStates[page];
 
-    // Determine which filesystem item is underneath
-    // the mouse cursor.
-    QModelIndex index =
-        state.fileTreeView->indexAt(position);
+    QTreeView *fileTreeView =
+        state.fileTreeView;
 
-    // Create the menu.
-    QMenu menu(state.fileTreeView);
+    QModelIndex clickedIndex =
+        fileTreeView->indexAt(position);
 
-    // If the user clicked an actual file/directory,
-    // show item-specific actions.
-    if (index.isValid())
+    QMenu menu(fileTreeView);
+
+    if (clickedIndex.isValid())
     {
-        // Make the right-clicked item the current selection.
-        state.fileTreeView->setCurrentIndex(index);
+        QItemSelectionModel *selectionModel =
+            fileTreeView->selectionModel();
+
+        QModelIndex rowIndex =
+            clickedIndex.siblingAtColumn(0);
+
+        bool alreadySelected =
+            selectionModel->isRowSelected(
+                rowIndex.row(),
+                rowIndex.parent()
+            );
+
+        // Preserve an existing multi-selection when it contains the
+        // right-clicked row. Otherwise, select only the clicked row.
+        if (!alreadySelected)
+        {
+            selectionModel->select(
+                rowIndex,
+                QItemSelectionModel::ClearAndSelect |
+                    QItemSelectionModel::Rows
+            );
+
+            fileTreeView->setCurrentIndex(rowIndex);
+        }
+
+        QStringList selectedPaths =
+            selectedFilePaths(fileTreeView);
 
         QAction *openAction =
             menu.addAction("Open");
@@ -69,6 +81,10 @@ void MainWindow::showFileContextMenu(
 
         QAction *renameAction =
             menu.addAction("Rename");
+
+        renameAction->setEnabled(
+            selectedPaths.size() == 1
+        );
 
         menu.addSeparator();
 
@@ -90,26 +106,26 @@ void MainWindow::showFileContextMenu(
 
         QAction *selectedAction =
             menu.exec(
-                state.fileTreeView
+                fileTreeView
                     ->viewport()
                     ->mapToGlobal(position)
             );
 
         if (selectedAction == openAction)
         {
-            openItem(page, index);
+            openSelectedItems(page);
         }
         else if (selectedAction == copyAction)
         {
-            copyItemToClipboard(index);
+            copySelectedItemsToClipboard(page);
         }
         else if (selectedAction == renameAction)
         {
-            renameItem(index);
+            renameSelectedItem(page);
         }
         else if (selectedAction == deleteAction)
         {
-            deleteItem(index);
+            deleteSelectedItems(page);
         }
         else if (selectedAction == pasteAction)
         {
@@ -138,7 +154,7 @@ void MainWindow::showFileContextMenu(
 
     QAction *selectedAction =
         menu.exec(
-            state.fileTreeView
+            fileTreeView
                 ->viewport()
                 ->mapToGlobal(position)
         );
@@ -181,78 +197,120 @@ void MainWindow::openItem(
     );
 }
 
+void MainWindow::openSelectedItems(
+    QWidget *page
+)
+{
+    TabState &state =
+        tabStates[page];
+
+    QStringList paths =
+        selectedFilePaths(state.fileTreeView);
+
+    if (paths.isEmpty())
+    {
+        return;
+    }
+
+    if (paths.size() == 1)
+    {
+        const QString &path =
+            paths.first();
+
+        QFileInfo info(path);
+
+        if (info.isDir())
+        {
+            navigateTo(page, path);
+        }
+        else
+        {
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(path)
+            );
+        }
+
+        return;
+    }
+
+    for (const QString &path : paths)
+    {
+        QFileInfo info(path);
+
+        if (!info.exists())
+        {
+            continue;
+        }
+
+        if (info.isDir())
+        {
+            createTab(path);
+        }
+        else
+        {
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(path)
+            );
+        }
+    }
+}
+
 // -------------------------------------------------
 // COPY
 // -------------------------------------------------
 
-void MainWindow::copyItemToClipboard(
-    const QModelIndex &index
+void MainWindow::copySelectedItemsToClipboard(
+    QWidget *page
 )
 {
-    // Get the actual filesystem path of the selected item.
-    QString path =
-        fileModel->filePath(index);
+    TabState &state =
+        tabStates[page];
 
-    // Convert the normal path:
-    QUrl fileUrl =
-        QUrl::fromLocalFile(path);
+    QStringList paths =
+        selectedFilePaths(state.fileTreeView);
 
-    // QMimeData describes what kind of content
-    // we're putting onto the clipboard.
-    // We allocate it with new because QClipboard
-    // takes ownership of it.
+    if (paths.isEmpty())
+    {
+        return;
+    }
+
     auto *mimeData =
         new QMimeData;
 
-    // Put our file URL in a QList because the clipboard
-    // URL format supports multiple files.
     QList<QUrl> urls;
 
-    urls.append(fileUrl);
+    for (const QString &path : paths)
+    {
+        urls.append(
+            QUrl::fromLocalFile(path)
+        );
+    }
 
-    // This creates the standard text/uri-list
-    // clipboard representation used by desktop apps.
     mimeData->setUrls(urls);
 
-    // Also provide the normal path as plain text.
-    mimeData->setText(path);
+    mimeData->setText(
+        paths.join('\n')
+    );
 
-
-    // -------------------------------------------------
-    // GNOME FILE-MANAGER COMPATIBILITY
-    // -------------------------------------------------
-
-    // GNOME/Nautilus also recognizes this MIME type
-    // for file Copy/Paste operations.
-    // file:///some/file
     QByteArray gnomeClipboardData =
-        "copy\n" +
-        fileUrl.toEncoded();
+        "copy";
+
+    for (const QUrl &url : urls)
+    {
+        gnomeClipboardData += "\n";
+        gnomeClipboardData += url.toEncoded();
+    }
 
     mimeData->setData(
         "x-special/gnome-copied-files",
         gnomeClipboardData
     );
 
-
-    // -------------------------------------------------
-    // KDE FILE-MANAGER COMPATIBILITY
-    // -------------------------------------------------
-
-    // KDE applications can use this to distinguish
-    // Copy from Cut.
-    //
-    // 0 means Copy.
     mimeData->setData(
         "application/x-kde-cutselection",
         QByteArray("0")
     );
 
-
-    // Put everything onto the system clipboard.
-    //
-    // QClipboard takes ownership of mimeData,
-    // so we must NOT delete it ourselves.
     QApplication::clipboard()
         ->setMimeData(mimeData);
 }
@@ -427,12 +485,23 @@ QString MainWindow::makeUniqueCopyPath(const QString &sourcePath, const QString 
 // RENAME
 // -------------------------------------------------
 
-void MainWindow::renameItem(
-    const QModelIndex &index
+void MainWindow::renameSelectedItem(
+    QWidget *page
 )
 {
-    QString oldPath =
-        fileModel->filePath(index);
+    TabState &state =
+        tabStates[page];
+
+    QStringList paths =
+        selectedFilePaths(state.fileTreeView);
+
+    if (paths.size() != 1)
+    {
+        return;
+    }
+
+    const QString &oldPath =
+        paths.first();
 
     QFileInfo info(oldPath);
 
@@ -527,23 +596,46 @@ void MainWindow::renameItem(
 // DELETE
 // -------------------------------------------------
 
-void MainWindow::deleteItem(
-    const QModelIndex &index
+void MainWindow::deleteSelectedItems(
+    QWidget *page
 )
 {
-    QString path =
-        fileModel->filePath(index);
+    TabState &state =
+        tabStates[page];
 
-    QFileInfo info(path);
+    QStringList paths =
+        selectedFilePaths(state.fileTreeView);
+
+    if (paths.isEmpty())
+    {
+        return;
+    }
+
+    QString message;
+
+    if (paths.size() == 1)
+    {
+        QFileInfo info(paths.first());
+
+        message =
+            QString(
+                "Move \"%1\" to the Trash?"
+            ).arg(info.fileName());
+    }
+    else
+    {
+        message =
+            QString(
+                "Move %1 selected items to the Trash?"
+            ).arg(paths.size());
+    }
 
 
     QMessageBox::StandardButton answer =
         QMessageBox::question(
             this,
             "Move to Trash",
-            QString(
-                "Move \"%1\" to the Trash?"
-            ).arg(info.fileName()),
+            message,
             QMessageBox::Yes |
                 QMessageBox::No,
             QMessageBox::No
@@ -557,14 +649,24 @@ void MainWindow::deleteItem(
     }
 
 
-    // Use the desktop's Trash instead of permanently
-    // destroying the file.
-    if (!QFile::moveToTrash(path))
+    QStringList failedPaths;
+
+    for (const QString &path : paths)
+    {
+        if (!QFile::moveToTrash(path))
+        {
+            failedPaths.append(path);
+        }
+    }
+
+    if (!failedPaths.isEmpty())
     {
         QMessageBox::warning(
             this,
             "Delete Failed",
-            "The item could not be moved to the Trash."
+            QString(
+                "%1 item(s) could not be moved to the Trash."
+            ).arg(failedPaths.size())
         );
     }
 }

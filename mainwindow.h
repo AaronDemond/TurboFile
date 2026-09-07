@@ -113,31 +113,45 @@ private:
 
     // Open a directory in TurboFile or open a file
     // using the desktop's default application.
+    // Open one specific item.
+    // Used primarily by double-clicking.
     void openItem(
         QWidget *page,
         const QModelIndex &index
     );
 
-    // Put a filesystem item onto the real desktop clipboard.
-    void copyItemToClipboard(
-        const QModelIndex &index
+    // Open every currently selected item.
+    void openSelectedItems(
+        QWidget *page
     );
 
-    // Copy filesystem items from the clipboard
-    // into this tab's current directory.
+    // Copy all selected filesystem items
+    // to the desktop clipboard.
+    void copySelectedItemsToClipboard(
+        QWidget *page
+    );
+
+    // Rename the selected item.
+    // Only works when exactly one item is selected.
+    void renameSelectedItem(
+        QWidget *page
+    );
+
+    // Move all selected items to Trash.
+    void deleteSelectedItems(
+        QWidget *page
+    );
+
+    // Copy all filesystem URLs from the clipboard into the current directory.
     void pasteClipboardItems(
         QWidget *page
     );
 
-    // Rename a file or directory.
-    void renameItem(
-        const QModelIndex &index
-    );
-
-    // Move a file or directory to the Trash.
-    void deleteItem(
-        const QModelIndex &index
-    );
+    // Return the filesystem paths represented
+    // by the selected rows in a tree.
+    QStringList selectedFilePaths(
+        QTreeView *fileTreeView
+    ) const;
 
     // Recursively copy either a file or directory.
     bool copyRecursively(
@@ -151,6 +165,7 @@ private:
         const QString &sourcePath,
         const QString &destinationDirectory
     ); 
+
 
     // Column sort
     void configureFileTreeView(

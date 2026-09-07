@@ -1,10 +1,13 @@
 #include "mainwindow.h"
+#include <qabstractitemmodel.h>
+#include <qcontainerfwd.h>
 #include <qitemselectionmodel.h>
 #include <qnamespace.h>
 #include <qtreeview.h>
 #include <qheaderview.h>
 #include <qfilesystemmodel.h>
 #include <qabstractitemview.h>
+#include <qitemselectionmodel.h>
 #include <qitemselectionmodel.h>
 
 void MainWindow::configureFileTreeView (
@@ -14,9 +17,9 @@ void MainWindow::configureFileTreeView (
 
     // set the default width of of the file columns
     // 0 = Name, 1 = Size, 2 = Type, 3 = Date Modified
-    fileTreeView->setColumnWidth(0, 355);
-    fileTreeView->setColumnWidth(2, 100);
-    fileTreeView->setColumnWidth(3, 100);
+    fileTreeView->setColumnWidth(0, 255);
+    fileTreeView->setColumnWidth(1, 100);
+    fileTreeView->setColumnWidth(2, 250);
     fileTreeView->setColumnWidth(3, 170);
 
     QHeaderView *header = fileTreeView->header();
@@ -31,4 +34,22 @@ void MainWindow::configureFileTreeView (
     fileTreeView->setSelectionMode(
         QAbstractItemView::ExtendedSelection
     );
+
+    fileTreeView->setSelectionBehavior(
+        QAbstractItemView::SelectRows
+    );
+
+
+}
+
+// get selected paths from the QTreeView
+QStringList MainWindow::selectedFilePaths(QTreeView *fileTreeView) const {
+    QItemSelectionModel *selectionModel = fileTreeView->selectionModel();
+    QModelIndexList selectedIndexes = selectionModel->selectedRows(0);
+    QStringList paths;
+    for (const QModelIndex &index : selectedIndexes) {
+        paths.append(fileModel->filePath(index));
+    }
+
+    return paths;
 }
