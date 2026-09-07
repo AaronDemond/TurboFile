@@ -4,7 +4,7 @@
 #include "sidebar/pinnedsidebar.h"
 #include "shellscriptdialog.h"
 
-#include <QTreeView>
+#include <QAbstractItemView>
 #include <QItemSelectionModel>
 
 #include <QMenu>
@@ -58,26 +58,24 @@ QString promptForItemName(
 
 void MainWindow::showFileContextMenu(
     QWidget *page,
+    QAbstractItemView *fileView,
     const QPoint &position
 )
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
-
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QModelIndex clickedIndex =
-        fileTreeView->indexAt(position);
+        fileView->indexAt(position);
 
-    QMenu menu(fileTreeView);
+    QMenu menu(fileView);
 
     if (clickedIndex.isValid())
     {
         QItemSelectionModel *selectionModel =
-            fileTreeView->selectionModel();
+            fileView->selectionModel();
 
         QModelIndex rowIndex =
             clickedIndex.siblingAtColumn(0);
@@ -98,11 +96,11 @@ void MainWindow::showFileContextMenu(
                     QItemSelectionModel::Rows
             );
 
-            fileTreeView->setCurrentIndex(rowIndex);
+            fileView->setCurrentIndex(rowIndex);
         }
 
         QStringList selectedPaths =
-            selectedFilePaths(fileTreeView);
+            selectedFilePaths(fileView);
 
         QAction *openAction =
             menu.addAction("Open");
@@ -178,7 +176,7 @@ void MainWindow::showFileContextMenu(
 
         QAction *selectedAction =
             menu.exec(
-                fileTreeView
+                fileView
                     ->viewport()
                     ->mapToGlobal(position)
             );
@@ -265,7 +263,7 @@ void MainWindow::showFileContextMenu(
 
     QAction *selectedAction =
         menu.exec(
-            fileTreeView
+            fileView
                 ->viewport()
                 ->mapToGlobal(position)
         );
@@ -565,16 +563,16 @@ void MainWindow::runShellScriptHere(QWidget *page)
 
 void MainWindow::duplicateSelectedItems(QWidget *page)
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
+    QAbstractItemView *fileView =
+        fileViewForPage(page);
 
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QStringList sourcePaths =
-        selectedFilePaths(fileTreeView);
+        selectedFilePaths(fileView);
 
     if (sourcePaths.isEmpty())
     {
@@ -698,16 +696,16 @@ void MainWindow::openSelectedItems(
     QWidget *page
 )
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
+    QAbstractItemView *fileView =
+        fileViewForPage(page);
 
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QStringList paths =
-        selectedFilePaths(fileTreeView);
+        selectedFilePaths(fileView);
 
     if (paths.isEmpty())
     {
@@ -765,16 +763,16 @@ void MainWindow::copySelectedItemsToClipboard(
     QWidget *page
 )
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
+    QAbstractItemView *fileView =
+        fileViewForPage(page);
 
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QStringList paths =
-        selectedFilePaths(fileTreeView);
+        selectedFilePaths(fileView);
 
     if (paths.isEmpty())
     {
@@ -1008,16 +1006,16 @@ void MainWindow::renameSelectedItem(
     QWidget *page
 )
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
+    QAbstractItemView *fileView =
+        fileViewForPage(page);
 
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QStringList paths =
-        selectedFilePaths(fileTreeView);
+        selectedFilePaths(fileView);
 
     if (paths.size() != 1)
     {
@@ -1135,16 +1133,16 @@ void MainWindow::deleteSelectedItems(
     QWidget *page
 )
 {
-    QTreeView *fileTreeView =
-        fileTreeForPage(page);
+    QAbstractItemView *fileView =
+        fileViewForPage(page);
 
-    if (fileTreeView == nullptr)
+    if (fileView == nullptr)
     {
         return;
     }
 
     QStringList paths =
-        selectedFilePaths(fileTreeView);
+        selectedFilePaths(fileView);
 
     if (paths.isEmpty())
     {

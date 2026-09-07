@@ -31,6 +31,10 @@ public:
     QString filePath(const QModelIndex &index) const;
     bool isDir(const QModelIndex &index) const;
 
+    // Identify direct regular files without treating symbolic links to files
+    // as files. BrowserPane uses this for its active-directory status count.
+    bool isRegularFile(const QModelIndex &index) const;
+
     // Forward successful filesystem mutations to the source cache.
     void invalidatePaths(const QStringList &paths);
 

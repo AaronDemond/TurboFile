@@ -7,11 +7,14 @@
 #include <QWidget>
 
 class BrowserFileTreeView;
+class BrowserFileListView;
+class BrowserLineEdit;
 class DirectorySizeSortProxyModel;
-class QLineEdit;
+class QAbstractItemView;
 class QModelIndex;
 class QPushButton;
 class QEvent;
+class QStackedWidget;
 class QTreeView;
 
 // One independent file explorer inside one tab of a pane group.
@@ -26,6 +29,16 @@ class BrowserPane : public QWidget
     Q_OBJECT
 
 public:
+    // Details uses the existing column view. SmallIcons and BigIcons share one
+    // grid widget and differ only in icon and cell geometry.
+    enum class FileViewMode
+    {
+        Details,
+        SmallIcons,
+        BigIcons
+    };
+    Q_ENUM(FileViewMode)
+
     // fileModel is borrowed. MainWindow owns the shared proxy for the
     // whole window so every pane sees one cache and one worker pool.
     explicit BrowserPane(
@@ -35,8 +48,25 @@ public:
 
     QString currentPath() const;
     QTreeView *fileTreeView() const;
+    QAbstractItemView *activeFileView() const;
+    QList<QAbstractItemView *> fileViews() const;
+    FileViewMode fileViewMode() const;
+    QString searchText() const;
+    int regularFileCount() const;
     QStringList history() const;
     int historyIndex() const;
+
+    // Switch the visible file presentation without changing the current
+    // directory, model, or selected filesystem rows.
+    void setFileViewMode(FileViewMode mode);
+
+    // Both views share the tree's QItemSelectionModel after MainWindow has
+    // attached and configured the details model.
+    void synchronizeFileViewSelection();
+
+    // Filter direct children of this pane's current directory by file name.
+    // The text belongs to the pane so split panes can filter independently.
+    void setSearchText(const QString &text);
 
     // Change this pane's root directory. addToHistory is false for Back
     // and Forward so those moves reuse existing history entries.
@@ -62,6 +92,12 @@ signals:
     void splitRequested();
     void closeRequested();
     void pathChanged(const QString &path);
+    void fileViewModeChanged(FileViewMode mode);
+
+    // The direct regular-file count changed because this pane navigated or
+    // its current directory gained, lost, or changed filesystem rows.
+    void regularFileCountChanged(int count);
+
     // Destination is already a local directory path, not a model index.
     void filesDropped(
         const QList<QUrl> &urls,
@@ -79,6 +115,16 @@ protected:
 private:
     void navigateFromPathBar();
     void updateNavigationButtons();
+
+    // Apply the current case-insensitive name filter to both presentations.
+    // Rows are hidden per view rather than removed from the shared proxy, so
+    // other tabs and the neighboring split pane remain unchanged.
+    void applySearchFilter();
+
+    // Count direct regular-file children under the current root. Directories
+    // and symbolic links are intentionally excluded from the status total.
+    void updateRegularFileCount();
+
     void handleFilesDropped(
         const QList<QUrl> &urls,
         const QModelIndex &hoverIndex
@@ -88,7 +134,12 @@ private:
     DirectorySizeSortProxyModel *fileModel = nullptr;
 
     BrowserFileTreeView *treeView = nullptr;
-    QLineEdit *pathLineEdit = nullptr;
+    BrowserFileListView *iconView = nullptr;
+    QStackedWidget *fileViewStack = nullptr;
+    FileViewMode currentFileViewMode = FileViewMode::Details;
+    QString currentSearchText;
+    int currentRegularFileCount = 0;
+    BrowserLineEdit *pathLineEdit = nullptr;
     QPushButton *backButton = nullptr;
     QPushButton *forwardButton = nullptr;
     QPushButton *upButton = nullptr;

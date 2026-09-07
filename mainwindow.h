@@ -13,15 +13,18 @@
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
 class BrowserPane;
+class BrowserLineEdit;
 class DirectorySizeSortProxyModel;
 // Window-level pinned-directory panel (not per-tab).
 class PinnedSidebar;
+class QAbstractItemView;
 class QCloseEvent;
+class QEvent;
 class QSplitter;
 class QTimer;
 class QWidget;
 class QTreeView;
-class QLineEdit;
+class QLabel;
 class QPushButton;
 class QModelIndex;
 class QPoint;
@@ -46,6 +49,9 @@ public:
 protected:
     // Flush the last sidebar width before the window actually closes.
     void closeEvent(QCloseEvent *event) override;
+
+    // Keep the bottom search field aligned when the sidebar moves or resizes.
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     // One real tab page contains exactly one BrowserPane. The owning tab
@@ -86,14 +92,33 @@ private:
     // Coalesces QSettings writes so splitterMoved does not hit disk per pixel.
     QTimer *sidebarLayoutSaveTimer = nullptr;
 
+    // The bottom search field filters the active pane only. The adjacent view
+    // buttons switch that pane's presentation between details and icon grids.
+    QWidget *bottomControlsWidget = nullptr;
+    BrowserLineEdit *fileSearchLineEdit = nullptr;
+    QPushButton *detailsViewButton = nullptr;
+    QPushButton *smallIconsViewButton = nullptr;
+    QPushButton *bigIconsViewButton = nullptr;
+    QLabel *fileCountLabel = nullptr;
+
     // Insert the sidebar, restore width/collapsed, and connect navigation.
     void setupSidebar();
     // Apply strip width or expandedSidebarWidth to the splitter.
     void applySidebarSplitterSizes();
+    // Match the search field's horizontal edges to the live sidebar frame.
+    void alignBottomControlsToSidebar();
     // Restart the short save timer; the actual write happens after dragging.
     void scheduleSidebarLayoutSave();
     // Write sidebar/width and sidebar/collapsed to QSettings.
     void saveSidebarLayout();
+
+    // Add left-aligned Search and view controls plus a right-aligned regular-
+    // file count to the status bar, synchronized with the active pane.
+    void setupViewModeControls();
+    void updateViewModeControls();
+
+    // Resolve the pane in the current tab of the most recently active group.
+    BrowserPane *activeBrowserPane() const;
 
     // Build a new tab in the active tab group.
     void createTab(const QString &path);
@@ -131,8 +156,12 @@ private:
     // Remember which pane should receive pin clicks and file actions.
     void setActivePane(QWidget *page, BrowserPane *pane);
 
-    // Tree belonging to the tab's active pane, or null if the tab is gone.
-    QTreeView *fileTreeForPage(QWidget *page) const;
+    // Make the current tab in the leftmost group the active keyboard target.
+    // Called after a two-pane workspace is created or restored.
+    void focusLeftPane();
+
+    // Visible file view belonging to the tab's active pane, or null if gone.
+    QAbstractItemView *fileViewForPage(QWidget *page) const;
 
     // Copy dropped or pasted URLs into dest using copyRecursively.
     void copyUrlsIntoDirectory(
@@ -171,6 +200,7 @@ private:
     // Show the right-click menu for the file view.
     void showFileContextMenu(
         QWidget *page,
+        QAbstractItemView *fileView,
         const QPoint &position
     );
 
@@ -231,9 +261,9 @@ private:
     QString currentDirectoryPath(QWidget *page) const;
 
     // Return the filesystem paths represented
-    // by the selected rows in a tree.
+    // by the selected rows in either file presentation.
     QStringList selectedFilePaths(
-        QTreeView *fileTreeView
+        QAbstractItemView *fileView
     ) const;
 
     // Recursively copy either a file or directory.

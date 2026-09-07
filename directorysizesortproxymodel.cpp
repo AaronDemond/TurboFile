@@ -73,6 +73,22 @@ bool DirectorySizeSortProxyModel::isDir(
     );
 }
 
+bool DirectorySizeSortProxyModel::isRegularFile(
+    const QModelIndex &index
+) const
+{
+    // QFileInfo::isFile() follows a symbolic link to its file target. Check
+    // isSymbolicLink() first so links are excluded from the bottom-row count
+    // even when their target is an otherwise ordinary file.
+    QFileInfo info = filesystemModel->fileInfo(
+        mapToSource(index)
+    );
+
+    return
+        info.isFile() &&
+        !info.isSymbolicLink();
+}
+
 void DirectorySizeSortProxyModel::invalidatePaths(
     const QStringList &paths
 )

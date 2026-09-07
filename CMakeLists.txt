@@ -31,8 +31,12 @@ qt_add_executable(TurboFIle
     # Per-tab split-pane file explorers.
     browser/browserpane.cpp
     browser/browserpane.h
+    browser/browserfilelistview.cpp
+    browser/browserfilelistview.h
     browser/browserfiletreeview.cpp
     browser/browserfiletreeview.h
+    browser/browserlineedit.cpp
+    browser/browserlineedit.h
     browser/browserconstants.h
 
     # Window-level pinned-directory sidebar.

@@ -23,9 +23,11 @@ QPixmap pinFolderIcon(const QColor &tint, int size)
     const int tintG = tint.green();
     const int tintB = tint.blue();
 
-    // Multiply the chosen color by each pixel's luminance so highlights
-    // and shadows in the original folder artwork are preserved.
-    // Alpha is left unchanged so the folder outline stays intact.
+    // Use the selected RGB value directly for every visible icon pixel. The
+    // previous luminance multiplication darkened each channel according to
+    // the source artwork, so a vivid menu swatch produced a muted folder.
+    // Keeping only the theme icon's alpha preserves its silhouette and smooth
+    // antialiased edges while the opaque body displays the exact chosen color.
     for (int y = 0; y < image.height(); ++y)
     {
         auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
@@ -38,11 +40,10 @@ QPixmap pinFolderIcon(const QColor &tint, int size)
                 continue;
             }
 
-            const int luminance = qGray(pixel);
             line[x] = qRgba(
-                (tintR * luminance) / 255,
-                (tintG * luminance) / 255,
-                (tintB * luminance) / 255,
+                tintR,
+                tintG,
+                tintB,
                 alpha
             );
         }

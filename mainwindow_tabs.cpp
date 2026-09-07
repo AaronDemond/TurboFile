@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFileInfo>
 
+#include <QAbstractItemView>
 #include <QLineEdit>
 #include <QTreeView>
 #include <QPushButton>
@@ -27,9 +28,10 @@
 void MainWindow::setupPaneTabWidget(QTabWidget *tabWidget)
 {
     // Ignored horizontal size lets QSplitter allocate less than the tab bar's
-    // ideal width. QTabBar then scrolls and elides instead of painting across
-    // the neighboring pane's visual territory.
-    tabWidget->setMinimumWidth(0);
+    // ideal width. The explicit minimum still stops resizing before the pane's
+    // Back, Forward, Up, path, Split, and Close controls become cramped.
+    // QTabBar scroll buttons handle excess tabs inside that safe width.
+    tabWidget->setMinimumWidth(kPaneGroupMinimumWidth);
     tabWidget->setSizePolicy(
         QSizePolicy::Ignored,
         QSizePolicy::Expanding
@@ -88,6 +90,7 @@ void MainWindow::setupPaneTabWidget(QTabWidget *tabWidget)
         [this, tabWidget, newTabPlaceholder](int index)
         {
             activeTabWidget = tabWidget;
+            updateViewModeControls();
 
             if (tabWidget->widget(index) == newTabPlaceholder)
             {
@@ -109,6 +112,7 @@ void MainWindow::setupPaneTabWidget(QTabWidget *tabWidget)
             if (page != nullptr && page != newTabPlaceholder)
             {
                 activeTabWidget = tabWidget;
+                updateViewModeControls();
             }
         }
     );
@@ -223,6 +227,7 @@ QWidget *MainWindow::createTabInGroup(
     tabWidget->setCurrentIndex(tabIndex);
     updateTabTitle(page, pane->currentPath());
     updatePaneChrome();
+    updateViewModeControls();
     return page;
 }
 
@@ -262,8 +267,18 @@ QTabWidget *MainWindow::createPaneTabWidget()
 BrowserPane *MainWindow::createBrowserPane(QWidget *page)
 {
     auto *pane = new BrowserPane(fileModel, page);
+
+    // Details requires its custom header and column sizing. The icon view is
+    // already configured as a one-column grid by BrowserPane; after Details
+    // receives its model, both presentations can share one selection model.
     configureFileTreeView(pane->fileTreeView());
-    pane->fileTreeView()->setContextMenuPolicy(Qt::CustomContextMenu);
+    pane->synchronizeFileViewSelection();
+
+    for (QAbstractItemView *fileView : pane->fileViews())
+    {
+        fileView->setContextMenuPolicy(Qt::CustomContextMenu);
+    }
+
     setupPaneConnections(page, pane);
     return pane;
 }
@@ -294,9 +309,20 @@ void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
         pane,
         &BrowserPane::closeRequested,
         this,
-        [this, page, pane]()
+        [this, pane]()
         {
-            closePane(page, pane);
+            // The emitting BrowserPane is the authoritative control the user
+            // clicked. Resolve its current page from live state instead of
+            // trusting a separately captured page after tabs were restored,
+            // reordered, or one split group was removed.
+            for (auto iterator = tabStates.begin(); iterator != tabStates.end(); ++iterator)
+            {
+                if (iterator->activePane == pane)
+                {
+                    closePane(iterator.key(), pane);
+                    return;
+                }
+            }
         }
     );
 
@@ -313,6 +339,50 @@ void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
 
     connect(
         pane,
+        &BrowserPane::fileViewModeChanged,
+        this,
+        [this, page, pane](BrowserPane::FileViewMode)
+        {
+            // Ignore signals from a background tab. The bottom row always
+            // describes only the pane the user can currently act upon.
+            auto stateIterator = tabStates.constFind(page);
+
+            if (
+                stateIterator != tabStates.constEnd() &&
+                stateIterator->activePane == pane &&
+                activeTabWidget == stateIterator->tabWidget &&
+                stateIterator->tabWidget->currentWidget() == page
+            )
+            {
+                updateViewModeControls();
+            }
+        }
+    );
+
+    connect(
+        pane,
+        &BrowserPane::regularFileCountChanged,
+        this,
+        [this, page, pane](int)
+        {
+            // Every pane observes the shared model, but the status bar must
+            // describe only the currently visible tab in the active group.
+            auto stateIterator = tabStates.constFind(page);
+
+            if (
+                stateIterator != tabStates.constEnd() &&
+                stateIterator->activePane == pane &&
+                activeTabWidget == stateIterator->tabWidget &&
+                stateIterator->tabWidget->currentWidget() == page
+            )
+            {
+                updateViewModeControls();
+            }
+        }
+    );
+
+    connect(
+        pane,
         &BrowserPane::filesDropped,
         this,
         [this](const QList<QUrl> &urls, const QString &destination)
@@ -321,29 +391,33 @@ void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
         }
     );
 
-    QTreeView *fileTreeView = pane->fileTreeView();
+    // Details and icon modes emit the same abstract-view signals. Passing the
+    // originating view into the context menu preserves correct hit testing
+    // because each presentation lays out the same indexes differently.
+    for (QAbstractItemView *fileView : pane->fileViews())
+    {
+        connect(
+            fileView,
+            &QAbstractItemView::doubleClicked,
+            this,
+            [this, page, pane](const QModelIndex &index)
+            {
+                setActivePane(page, pane);
+                openItem(page, index);
+            }
+        );
 
-    connect(
-        fileTreeView,
-        &QTreeView::doubleClicked,
-        this,
-        [this, page, pane](const QModelIndex &index)
-        {
-            setActivePane(page, pane);
-            openItem(page, index);
-        }
-    );
-
-    connect(
-        fileTreeView,
-        &QTreeView::customContextMenuRequested,
-        this,
-        [this, page, pane](const QPoint &position)
-        {
-            setActivePane(page, pane);
-            showFileContextMenu(page, position);
-        }
-    );
+        connect(
+            fileView,
+            &QAbstractItemView::customContextMenuRequested,
+            this,
+            [this, page, pane, fileView](const QPoint &position)
+            {
+                setActivePane(page, pane);
+                showFileContextMenu(page, fileView, position);
+            }
+        );
+    }
 }
 
 void MainWindow::updatePaneChrome()
@@ -387,6 +461,11 @@ void MainWindow::splitPane(QWidget *page)
     if (newGroup != nullptr)
     {
         createTabInGroup(newGroup, startPath);
+
+        // createTabInGroup() necessarily activates the group receiving the new
+        // tab. A split is opened to the right, but the user's original left
+        // pane remains the default work target after construction completes.
+        focusLeftPane();
     }
 }
 
@@ -402,7 +481,24 @@ void MainWindow::closePane(QWidget *page, BrowserPane *pane)
         return;
     }
 
-    QTabWidget *group = stateIterator->tabWidget;
+    QTabWidget *group = nullptr;
+
+    // Find the QTabWidget that physically contains the clicked pane's page.
+    // This prevents stale logical ownership from ever deleting the neighboring
+    // split group when the left pane's toolbar Close button is pressed.
+    for (QTabWidget *candidate : std::as_const(paneTabWidgets))
+    {
+        if (candidate != nullptr && candidate->indexOf(page) >= 0)
+        {
+            group = candidate;
+            break;
+        }
+    }
+
+    if (group == nullptr)
+    {
+        return;
+    }
 
     // Removing a split group closes all tabs it owns. Collect page pointers
     // first because deleting the QTabWidget recursively destroys those pages.
@@ -440,6 +536,7 @@ void MainWindow::closePane(QWidget *page, BrowserPane *pane)
     }
 
     updatePaneChrome();
+    updateViewModeControls();
 }
 
 void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
@@ -463,9 +560,56 @@ void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
     {
         it->tabWidget->setCurrentWidget(page);
     }
+
+    updateViewModeControls();
 }
 
-QTreeView *MainWindow::fileTreeForPage(QWidget *page) const
+void MainWindow::focusLeftPane()
+{
+    if (paneTabWidgets.isEmpty())
+    {
+        return;
+    }
+
+    // paneTabWidgets is maintained in visual left-to-right order. Its first
+    // QTabWidget therefore owns the pane that should receive default focus.
+    QTabWidget *leftTabWidget = paneTabWidgets.first();
+    QWidget *leftPage = leftTabWidget->currentWidget();
+    QWidget *leftPlaceholder =
+        newTabPlaceholders.value(leftTabWidget);
+
+    // A plus-only or partially destroyed group has no BrowserPane to focus.
+    // Keep the guard local so startup recovery cannot dereference stale state.
+    if (leftPage == nullptr || leftPage == leftPlaceholder)
+    {
+        return;
+    }
+
+    auto stateIterator = tabStates.find(leftPage);
+
+    if (
+        stateIterator == tabStates.end() ||
+        stateIterator->activePane == nullptr
+    )
+    {
+        return;
+    }
+
+    BrowserPane *leftPane =
+        stateIterator->activePane;
+
+    // setActivePane() synchronizes command routing and the bottom search/view
+    // controls. Focus then goes to the pane's visible Details or icon view so
+    // keyboard navigation also begins on the left, not on its tab bar.
+    setActivePane(leftPage, leftPane);
+
+    if (QAbstractItemView *fileView = leftPane->activeFileView())
+    {
+        fileView->setFocus(Qt::OtherFocusReason);
+    }
+}
+
+QAbstractItemView *MainWindow::fileViewForPage(QWidget *page) const
 {
     auto it = tabStates.constFind(page);
     if (it == tabStates.constEnd() || it->activePane == nullptr)
@@ -473,7 +617,7 @@ QTreeView *MainWindow::fileTreeForPage(QWidget *page) const
         return nullptr;
     }
 
-    return it->activePane->fileTreeView();
+    return it->activePane->activeFileView();
 }
 
 // Update the tab label to match the name of the directory currently displayed.

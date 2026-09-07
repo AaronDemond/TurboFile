@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "browser/browserconstants.h"
+#include "browser/browserlineedit.h"
 #include "browser/browserpane.h"
 #include "directorysizesortproxymodel.h"
 #include "sidebar/pinnedconstants.h"
@@ -11,20 +12,24 @@
 #include <QFileInfo>
 
 // Widgets created dynamically for each file-browser tab.
+#include <QLabel>
 #include <QLineEdit>
 #include <QTreeView>
 #include <QPushButton>
+#include <QStatusBar>
 #include <QWidget>
 
 // Layouts arrange the navigation controls above the file tree.
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 // Splitter holds the pinned sidebar and the tab widget.
-#include <QByteArray>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QList>
+#include <QLayout>
 #include <QSplitter>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QStringList>
 #include <QTimer>
 
@@ -48,6 +53,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Sidebar sits beside the tab widget, not inside each tab.
     setupSidebar();
+
+    // The status bar is the one window-wide bottom row, so these controls do
+    // not duplicate when the workspace is split into two tab groups.
+    setupViewModeControls();
 
     // Start QFileSystemModel's asynchronous directory loading at the home path.
     // Individual tabs later choose independent root indexes within this model.
@@ -75,9 +84,230 @@ MainWindow::MainWindow(QWidget *parent)
 
 }
 
+void MainWindow::setupViewModeControls()
+{
+    // QStatusBar stretches this container across its normal message area. The
+    // search and view controls begin at the left edge; one expanding spacer
+    // pushes the active directory's regular-file count to the far right.
+    bottomControlsWidget = new QWidget(ui->statusbar);
+    auto *layout = new QHBoxLayout(bottomControlsWidget);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+
+    // The status row should adapt to the window, not establish the window's
+    // horizontal minimum from the combined preferred widths of search, three
+    // buttons, and the file count. SetNoConstraint permits those controls to
+    // compress or clip only at very narrow widths while the explicit browser
+    // pane minimums remain the authoritative window constraint.
+    layout->setSizeConstraint(QLayout::SetNoConstraint);
+    bottomControlsWidget->setMinimumWidth(0);
+    bottomControlsWidget->setSizePolicy(
+        QSizePolicy::Ignored,
+        QSizePolicy::Fixed
+    );
+
+    // The search field and every pane path field are BrowserLineEdit objects.
+    // Their visual styling therefore comes from one constructor instead of
+    // relying on different parent-widget palette inheritance.
+    fileSearchLineEdit =
+        new BrowserLineEdit(bottomControlsWidget);
+    detailsViewButton =
+        new QPushButton(tr("Details"), bottomControlsWidget);
+    smallIconsViewButton =
+        new QPushButton(tr("Small Icons"), bottomControlsWidget);
+    bigIconsViewButton =
+        new QPushButton(tr("Big Icons"), bottomControlsWidget);
+    fileCountLabel =
+        new QLabel(tr("0 Files"), bottomControlsWidget);
+
+    // Right alignment keeps changing digit counts anchored against the status
+    // bar edge. A zero explicit minimum allows the label to yield space when
+    // the overall window approaches the browser pane minimum.
+    fileCountLabel->setMinimumWidth(0);
+    fileCountLabel->setAlignment(
+        Qt::AlignRight |
+        Qt::AlignVCenter
+    );
+
+    // The lowercase placeholder is centered inside the empty field as
+    // requested. QLineEdit applies the same alignment while typing, and its
+    // built-in clear action appears only while text exists.
+    fileSearchLineEdit->setPlaceholderText(
+        tr("search")
+    );
+    fileSearchLineEdit->setAlignment(Qt::AlignCenter);
+    fileSearchLineEdit->setClearButtonEnabled(true);
+
+    // Auto-exclusive checkable buttons provide a compact mode selector using
+    // the platform's normal QPushButton styling rather than custom colors.
+    for (
+        QPushButton *button :
+        {detailsViewButton, smallIconsViewButton, bigIconsViewButton}
+    )
+    {
+        button->setCheckable(true);
+        button->setAutoExclusive(true);
+        button->setMinimumWidth(0);
+    }
+
+    layout->addWidget(fileSearchLineEdit);
+    layout->addSpacing(6);
+    layout->addWidget(detailsViewButton);
+    layout->addWidget(smallIconsViewButton);
+    layout->addWidget(bigIconsViewButton);
+
+    // This is the only stretch in the row. It preserves the requested left
+    // alignment while reserving the opposite corner for a stable count label.
+    layout->addStretch();
+    layout->addWidget(fileCountLabel);
+
+    ui->statusbar->addWidget(bottomControlsWidget, 1);
+
+    // Geometry is not final until QMainWindow lays out its central widget and
+    // status bar. The sidebar event filter keeps this alignment current after
+    // the first pass and after every splitter resize or collapse transition.
+    alignBottomControlsToSidebar();
+
+    // textChanged fires for each insertion and deletion, producing the live
+    // filtering behavior. activeBrowserPane() keeps the query scoped to the
+    // tab and split side the user most recently interacted with.
+    connect(
+        fileSearchLineEdit,
+        &QLineEdit::textChanged,
+        this,
+        [this](const QString &text)
+        {
+            if (BrowserPane *pane = activeBrowserPane())
+            {
+                pane->setSearchText(text);
+            }
+        }
+    );
+
+    connect(
+        detailsViewButton,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            if (BrowserPane *pane = activeBrowserPane())
+            {
+                pane->setFileViewMode(
+                    BrowserPane::FileViewMode::Details
+                );
+            }
+        }
+    );
+
+    connect(
+        smallIconsViewButton,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            if (BrowserPane *pane = activeBrowserPane())
+            {
+                pane->setFileViewMode(
+                    BrowserPane::FileViewMode::SmallIcons
+                );
+            }
+        }
+    );
+
+    connect(
+        bigIconsViewButton,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            if (BrowserPane *pane = activeBrowserPane())
+            {
+                pane->setFileViewMode(
+                    BrowserPane::FileViewMode::BigIcons
+                );
+            }
+        }
+    );
+
+    updateViewModeControls();
+}
+
+BrowserPane *MainWindow::activeBrowserPane() const
+{
+    if (activeTabWidget == nullptr)
+    {
+        return nullptr;
+    }
+
+    QWidget *page = activeTabWidget->currentWidget();
+    auto stateIterator = tabStates.constFind(page);
+
+    if (stateIterator == tabStates.constEnd())
+    {
+        return nullptr;
+    }
+
+    return stateIterator->activePane;
+}
+
+void MainWindow::updateViewModeControls()
+{
+    BrowserPane *pane = activeBrowserPane();
+    const bool hasActivePane = pane != nullptr;
+
+    detailsViewButton->setEnabled(hasActivePane);
+    smallIconsViewButton->setEnabled(hasActivePane);
+    bigIconsViewButton->setEnabled(hasActivePane);
+    fileSearchLineEdit->setEnabled(hasActivePane);
+
+    // The count describes every direct regular file in the active directory,
+    // not only rows matching the current search. Directories and symbolic
+    // links are excluded by BrowserPane's proxy-safe metadata check.
+    const int fileCount =
+        hasActivePane ? pane->regularFileCount() : 0;
+    fileCountLabel->setText(
+        QStringLiteral("%1 %2").arg(
+            fileCount
+        ).arg(
+            fileCount == 1 ? tr("File") : tr("Files")
+        )
+    );
+
+    // Changing tabs or split sides must display that pane's own search text.
+    // Blocking the signal prevents setText() from applying the old pane's
+    // query to the newly active pane during this synchronization step.
+    const QSignalBlocker searchSignalBlocker(fileSearchLineEdit);
+    fileSearchLineEdit->setText(
+        hasActivePane
+            ? pane->searchText()
+            : QString()
+    );
+
+    if (!hasActivePane)
+    {
+        return;
+    }
+
+    BrowserPane::FileViewMode mode = pane->fileViewMode();
+    detailsViewButton->setChecked(
+        mode == BrowserPane::FileViewMode::Details
+    );
+    smallIconsViewButton->setChecked(
+        mode == BrowserPane::FileViewMode::SmallIcons
+    );
+    bigIconsViewButton->setChecked(
+        mode == BrowserPane::FileViewMode::BigIcons
+    );
+}
+
 void MainWindow::setupSidebar()
 {
     pinnedSidebar = new PinnedSidebar(ui->centralwidget);
+
+    // QWidget has no resized signal. Observing the sidebar itself provides
+    // exact geometry updates whether its width changes through dragging,
+    // collapsing, session restoration, or a containing-window resize.
+    pinnedSidebar->installEventFilter(this);
 
     // Reparent the .ui tab widget into a splitter so the user can drag
     // the sidebar width. Children are not collapsible; collapse is the
@@ -236,12 +466,91 @@ void MainWindow::applySidebarSplitterSizes()
     // sizes() is a pixel pair for the two splitter panes. The second value
     // is the remaining window width so the tab widget still fills the rest.
     const int total = qMax(sidebarSplitter->width(), 1);
-    const int sidebarWidth = pinnedSidebar->isCollapsed()
+    const int requestedSidebarWidth = pinnedSidebar->isCollapsed()
         ? kSidebarCollapsedWidth
         : expandedSidebarWidth;
+
+    // Reserve the explicit minimum of every visible browser group before
+    // allocating space to the flexible sidebar. A large restored/sidebar drag
+    // width can therefore never force QMainWindow to grow to satisfy both.
+    const int paneCount = qMax(paneTabWidgets.size(), 1);
+    const int browserMinimumWidth =
+        (paneCount * kPaneGroupMinimumWidth) +
+        ((paneCount - 1) * kPaneSplitterHandleWidth);
+    const int maximumSidebarWidth =
+        qMax(
+            total -
+                browserMinimumWidth -
+                kSidebarSplitterHandleWidth,
+            0
+        );
+    const int sidebarWidth =
+        qMin(requestedSidebarWidth, maximumSidebarWidth);
+
     sidebarSplitter->setSizes(
         {sidebarWidth, qMax(total - sidebarWidth, 1)}
     );
+
+    alignBottomControlsToSidebar();
+}
+
+void MainWindow::alignBottomControlsToSidebar()
+{
+    if (
+        pinnedSidebar == nullptr ||
+        bottomControlsWidget == nullptr ||
+        fileSearchLineEdit == nullptr
+    )
+    {
+        return;
+    }
+
+    auto *layout =
+        qobject_cast<QHBoxLayout *>(bottomControlsWidget->layout());
+
+    if (layout == nullptr)
+    {
+        return;
+    }
+
+    // mapTo() compares real widget coordinates across the central widget and
+    // status bar hierarchies. The resulting left offset and frame width align
+    // both search-field edges with the pinned column instead of approximating
+    // them from saved splitter sizes or unrelated layout margins.
+    const QPoint sidebarLeft =
+        pinnedSidebar->mapTo(
+            bottomControlsWidget,
+            QPoint(0, 0)
+        );
+    const int leftMargin =
+        qMax(sidebarLeft.x(), 0);
+    const int sidebarWidth =
+        qMax(pinnedSidebar->width(), 1);
+
+    layout->setContentsMargins(
+        leftMargin,
+        0,
+        0,
+        0
+    );
+    fileSearchLineEdit->setPreferredWidth(sidebarWidth);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (
+        watched == pinnedSidebar &&
+        (
+            event->type() == QEvent::Move ||
+            event->type() == QEvent::Resize ||
+            event->type() == QEvent::Show
+        )
+    )
+    {
+        alignBottomControlsToSidebar();
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::scheduleSidebarLayoutSave()
@@ -294,11 +603,35 @@ void MainWindow::saveSession() const
     settings.remove(QStringLiteral("session/tabs"));
     settings.remove(QStringLiteral("session/groups"));
     settings.setValue(QStringLiteral("session/version"), 2);
+    // Store a scale-independent ratio rather than QSplitter::saveState(). The
+    // opaque state includes absolute pixel sizes, which can reopen a compact
+    // window at a much larger width than its current screen/layout permits.
+    settings.remove(QStringLiteral("session/groupSplitter"));
+
+    qreal leftPaneRatio = 0.5;
+
+    if (browserPaneSplitter != nullptr)
+    {
+        const QList<int> paneSizes =
+            browserPaneSplitter->sizes();
+
+        if (paneSizes.size() == 2)
+        {
+            const int paneWidthTotal =
+                paneSizes.at(0) + paneSizes.at(1);
+
+            if (paneWidthTotal > 0)
+            {
+                leftPaneRatio =
+                    static_cast<qreal>(paneSizes.at(0)) /
+                    paneWidthTotal;
+            }
+        }
+    }
+
     settings.setValue(
-        QStringLiteral("session/groupSplitter"),
-        browserPaneSplitter != nullptr
-            ? browserPaneSplitter->saveState()
-            : QByteArray()
+        QStringLiteral("session/groupSplitRatio"),
+        leftPaneRatio
     );
     settings.setValue(
         QStringLiteral("session/activeGroup"),
@@ -347,6 +680,13 @@ void MainWindow::saveSession() const
             settings.setValue(
                 QStringLiteral("historyIndex"),
                 pane->historyIndex()
+            );
+            // View mode belongs to the tab's BrowserPane. Saving the enum as
+            // an integer keeps QSettings data simple and allows old sessions,
+            // which have no value, to default to Details during restoration.
+            settings.setValue(
+                QStringLiteral("viewMode"),
+                static_cast<int>(pane->fileViewMode())
             );
             ++writtenTabCount;
         }
@@ -415,6 +755,13 @@ bool MainWindow::restoreSession()
                 settings.value(QStringLiteral("history")).toStringList();
             int historyIndex =
                 settings.value(QStringLiteral("historyIndex"), -1).toInt();
+            int viewModeValue =
+                settings.value(
+                    QStringLiteral("viewMode"),
+                    static_cast<int>(
+                        BrowserPane::FileViewMode::Details
+                    )
+                ).toInt();
 
             if (path.isEmpty())
             {
@@ -437,6 +784,17 @@ bool MainWindow::restoreSession()
                 path,
                 history,
                 historyIndex
+            );
+
+            // Clamp persisted data before converting it back to the enum so
+            // corrupt or newer settings cannot select an unknown stack page.
+            viewModeValue = qBound(
+                static_cast<int>(BrowserPane::FileViewMode::Details),
+                viewModeValue,
+                static_cast<int>(BrowserPane::FileViewMode::BigIcons)
+            );
+            stateIterator->activePane->setFileViewMode(
+                static_cast<BrowserPane::FileViewMode>(viewModeValue)
             );
             restoredPages.append(page);
             restoredAnyTab = true;
@@ -468,45 +826,66 @@ bool MainWindow::restoreSession()
         return false;
     }
 
-    const QByteArray splitterState =
-        settings.value(QStringLiteral("session/groupSplitter")).toByteArray();
-    bool splitterRestored = false;
+    // Restore only the relative split. Apply it after the first layout pass so
+    // the calculation uses this window's actual available width rather than
+    // stale absolute pixels from a previous session.
+    const qreal savedSplitRatio =
+        qBound(
+            0.0,
+            settings.value(
+                QStringLiteral("session/groupSplitRatio"),
+                0.5
+            ).toDouble(),
+            1.0
+        );
 
-    if (!splitterState.isEmpty() && browserPaneSplitter != nullptr)
-    {
-        splitterRestored = browserPaneSplitter->restoreState(splitterState);
-    }
-
-    // Missing or incompatible splitter state should still produce two usable,
-    // evenly sized groups instead of allowing either side to collapse.
     if (
-        !splitterRestored &&
         browserPaneSplitter != nullptr &&
         paneTabWidgets.size() == 2
     )
     {
-        const int total = qMax(browserPaneSplitter->width(), 2);
-        const int each = total / 2;
-        browserPaneSplitter->setSizes({each, total - each});
-    }
+        QTimer::singleShot(
+            0,
+            this,
+            [this, savedSplitRatio]()
+            {
+                const int availableWidth =
+                    qMax(
+                        browserPaneSplitter->width() -
+                            kPaneSplitterHandleWidth,
+                        kPaneGroupMinimumWidth * 2
+                    );
+                const int maximumLeftWidth =
+                    availableWidth - kPaneGroupMinimumWidth;
+                const int leftWidth =
+                    qBound(
+                        kPaneGroupMinimumWidth,
+                        qRound(availableWidth * savedSplitRatio),
+                        maximumLeftWidth
+                    );
 
-    int activeGroup =
-        settings.value(QStringLiteral("session/activeGroup"), 0).toInt();
-    activeTabWidget = paneTabWidgets.value(activeGroup, paneTabWidgets.first());
-
-    // An out-of-range or removed group can never receive actions. Fall back to
-    // the left group, which is guaranteed to contain a restored real tab.
-    QWidget *activePlaceholder =
-        newTabPlaceholders.value(activeTabWidget);
-    if (
-        activeTabWidget == nullptr ||
-        activeTabWidget->currentWidget() == activePlaceholder
-    )
-    {
-        activeTabWidget = paneTabWidgets.first();
+                browserPaneSplitter->setSizes(
+                    {leftWidth, availableWidth - leftWidth}
+                );
+            }
+        );
     }
 
     updatePaneChrome();
+
+    // Opening a restored two-pane workspace always starts interaction on the
+    // left, regardless of which group happened to be active at shutdown. Run
+    // the focus transfer on the next event-loop turn because the constructor's
+    // widgets have not completed their first layout and focus pass yet.
+    focusLeftPane();
+    QTimer::singleShot(
+        0,
+        this,
+        [this]()
+        {
+            focusLeftPane();
+        }
+    );
 
     return true;
 }
