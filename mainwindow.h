@@ -11,6 +11,7 @@
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
 class DirectorySizeSortProxyModel;
+class PinnedSidebar;
 class QWidget;
 class QTreeView;
 class QLineEdit;
@@ -57,6 +58,9 @@ private:
 
     // Placeholder tab that acts as the trailing new-tab button.
     QWidget *newTabPlaceholder = nullptr;
+
+    // Window-level sidebar of pinned directories.
+    PinnedSidebar *pinnedSidebar = nullptr;
 
     // Builds a new tab rooted at the supplied directory.
     void createTab(const QString &path);

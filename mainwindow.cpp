@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "directorysizesortproxymodel.h"
+#include "sidebar/pinnedsidebar.h"
 
 // Model and filesystem types used to provide directory contents and tab labels.
 #include <QDir>
@@ -31,6 +32,27 @@ MainWindow::MainWindow(QWidget *parent)
 {
     // Create the widgets declared in mainwindow.ui.
     ui->setupUi(this);
+
+    pinnedSidebar = new PinnedSidebar(ui->centralwidget);
+    auto *rootLayout =
+        qobject_cast<QHBoxLayout *>(ui->centralwidget->layout());
+    rootLayout->insertWidget(0, pinnedSidebar);
+    rootLayout->setStretch(0, 0);
+    rootLayout->setStretch(1, 1);
+
+    connect(
+        pinnedSidebar,
+        &PinnedSidebar::directoryActivated,
+        this,
+        [this](const QString &path)
+        {
+            QWidget *page = ui->tabWidget->currentWidget();
+            if (page != nullptr && page != newTabPlaceholder)
+            {
+                navigateTo(page, path);
+            }
+        }
+    );
 
     // Load the model from the user's home directory upward.
     fileModel->setRootPath(QDir::homePath());

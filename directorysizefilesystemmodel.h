@@ -11,8 +11,9 @@
 #include <atomic>
 #include <memory>
 
-// Extends QFileSystemModel with lazily calculated recursive directory sizes.
-// Files keep QFileSystemModel's normal Size-column behavior.
+// Extends QFileSystemModel with lazy background directory-size calculations.
+// Ordinary directories use recursive logical bytes, Windows drive roots use
+// filesystem-used space, and files retain QFileSystemModel's normal behavior.
 class DirectorySizeFileSystemModel : public QFileSystemModel
 {
     Q_OBJECT
@@ -32,7 +33,7 @@ public:
     // unavailable. Files and symbolic links never require background work.
     bool directorySizeReady(const QModelIndex &index) const;
 
-    // Return the raw recursive byte count used by the sorting proxy.
+    // Return the raw completed byte count used by the sorting proxy.
     bool directorySize(
         const QModelIndex &index,
         qint64 *bytes
@@ -102,7 +103,8 @@ private:
     // Normalize paths so every tab shares the same cache key.
     static QString normalizedPath(const QString &path);
 
-    // Calculate logical file bytes using worker-local filesystem objects.
+    // Calculate recursive logical bytes or mounted-drive used space using
+    // worker-local filesystem objects.
     static SizeResult calculateDirectorySize(
         const QString &path,
         const std::shared_ptr<std::atomic_bool> &cancellation

@@ -19,6 +19,14 @@ qt_add_executable(TurboFIle
     directorysizeheaderview.h
     directorysizesortproxymodel.cpp
     directorysizesortproxymodel.h
+    sidebar/pinnedsidebar.cpp
+    sidebar/pinnedsidebar.h
+    sidebar/pinnedlistwidget.cpp
+    sidebar/pinnedlistwidget.h
+    sidebar/pinneditemwidget.cpp
+    sidebar/pinneditemwidget.h
+    sidebar/pinnedpath.h
+    sidebar/pinnedconstants.h
     mainwindow.h
     mainwindow.ui
 )

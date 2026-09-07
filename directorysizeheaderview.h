@@ -23,7 +23,7 @@ protected:
 
 private:
     // Return from Size sorting when an external filesystem change makes one
-    // or more directory totals pending again.
+    // or more directory or mounted-drive totals pending again.
     void restoreLastStableSort();
 
     QTreeView *fileTreeView;

@@ -48,7 +48,9 @@ void MainWindow::configureFileTreeView (
         QAbstractItemView::SelectRows
     );
 
-
+    fileTreeView->setDragEnabled(true);
+    fileTreeView->setDragDropMode(QAbstractItemView::DragOnly);
+    fileTreeView->setDefaultDropAction(Qt::CopyAction);
 }
 
 // get selected paths from the QTreeView

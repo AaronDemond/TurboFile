@@ -7,6 +7,7 @@
 #include <QMetaObject>
 #include <QRunnable>
 #include <QStringList>
+#include <QStorageInfo>
 
 #include <limits>
 
@@ -516,6 +517,58 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
         return result;
     }
 
+    // A mounted Windows drive can contain millions of files plus filesystem
+    // metadata that is not meaningfully represented by summing visible file
+    // entries. Walking the whole volume can therefore leave its Size cell on
+    // "..." for a very long time and still disagree with Windows drive usage.
+    //
+    // QStorageInfo reads the filesystem's accounting directly. For an actual
+    // NTFS/FAT/exFAT mount root, total minus available bytes matches the used
+    // space reported by tools such as df and Windows drive properties. This
+    // is constant-time and still runs in the worker so no storage query is
+    // introduced into the UI thread.
+    QStorageInfo storage(path);
+    QByteArray filesystemType =
+        storage.fileSystemType().toLower();
+    QString storageRoot =
+        QDir::cleanPath(storage.rootPath());
+    QString requestedPath =
+        QDir::cleanPath(rootInfo.absoluteFilePath());
+
+    bool isWindowsFilesystem =
+        filesystemType == "ntfs" ||
+        filesystemType == "ntfs3" ||
+        filesystemType == "fuseblk" ||
+        filesystemType == "exfat" ||
+        filesystemType == "vfat" ||
+        filesystemType == "fat" ||
+        filesystemType == "fat32";
+
+    if (
+        storage.isValid() &&
+        storage.isReady() &&
+        isWindowsFilesystem &&
+        requestedPath == storageRoot
+    )
+    {
+        qint64 totalBytes = storage.bytesTotal();
+        qint64 availableBytes = storage.bytesAvailable();
+
+        // Defensive bounds protect the displayed result if a filesystem
+        // driver temporarily returns incomplete capacity information.
+        if (
+            totalBytes >= 0 &&
+            availableBytes >= 0 &&
+            availableBytes <= totalBytes
+        )
+        {
+            result.bytes = totalBytes - availableBytes;
+            return result;
+        }
+    }
+
+    // Ordinary directories retain recursive logical-size behavior. The
+    // explicit stack avoids call-stack growth on deeply nested Windows trees.
     QStringList pendingDirectories = {path};
 
     while (!pendingDirectories.isEmpty())

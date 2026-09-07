@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "directorysizesortproxymodel.h"
+#include "sidebar/pinnedsidebar.h"
 
 #include <QTreeView>
 #include <QItemSelectionModel>
@@ -76,6 +77,18 @@ void MainWindow::showFileContextMenu(
         QAction *openAction =
             menu.addAction("Open");
 
+        QAction *pinAction = nullptr;
+        if (selectedPaths.size() == 1)
+        {
+            const QString &selectedPath = selectedPaths.first();
+            QFileInfo selectedInfo(selectedPath);
+            if (selectedInfo.isDir() &&
+                !pinnedSidebar->isPinned(selectedPath))
+            {
+                pinAction = menu.addAction("Pin");
+            }
+        }
+
         QAction *copyAction =
             menu.addAction("Copy");
 
@@ -114,6 +127,10 @@ void MainWindow::showFileContextMenu(
         if (selectedAction == openAction)
         {
             openSelectedItems(page);
+        }
+        else if (pinAction != nullptr && selectedAction == pinAction)
+        {
+            pinnedSidebar->pinDirectory(selectedPaths.first());
         }
         else if (selectedAction == copyAction)
         {
