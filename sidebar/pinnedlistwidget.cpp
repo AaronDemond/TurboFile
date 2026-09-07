@@ -3,6 +3,7 @@
 #include "pinneditemwidget.h"
 #include "pinnedpath.h"
 
+#include <QColor>
 #include <QCursor>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -13,27 +14,36 @@
 #include <QPropertyAnimation>
 #include <QSettings>
 #include <QTimer>
+#include <QVariantMap>
 #include <QUrl>
 #include <QVBoxLayout>
 
 namespace {
 
+// Same organization/application as MainWindow sidebar layout settings.
 const QString kSettingsOrganization = QStringLiteral("TurboFile");
 const QString kSettingsApplication = QStringLiteral("TurboFile");
 const QString kPinnedDirectoriesKey =
     QStringLiteral("sidebar/pinnedDirectories");
+const QString kPinnedDirectoryColorsKey =
+    QStringLiteral("sidebar/pinnedDirectoryColors");
 
 } // namespace
+
+// Owns the ordered pin list, drop target, placeholder animation, and QSettings.
 
 PinnedListWidget::PinnedListWidget(QWidget *parent)
     : QWidget(parent)
 {
+    // Drops are handled on this widget, not on individual pin rows.
     setAcceptDrops(true);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
 
     pinsLayout = new QVBoxLayout(this);
     pinsLayout->setContentsMargins(0, 0, 0, 0);
     pinsLayout->setSpacing(0);
+    // Trailing stretch keeps pins packed at the top and makes empty space
+    // below them still belong to this widget for append drops.
     pinsLayout->addStretch();
 
     dropPlaceholder = new QWidget(this);
@@ -48,6 +58,8 @@ PinnedListWidget::PinnedListWidget(QWidget *parent)
         )
     );
 
+    // Animate maximumHeight and keep minimumHeight in sync so the layout
+    // actually opens a gap. One animation object is reused for every drag.
     placeholderAnimation =
         new QPropertyAnimation(dropPlaceholder, "maximumHeight", this);
     placeholderAnimation->setDuration(kPinAnimationMs);
@@ -94,6 +106,8 @@ void PinnedListWidget::addPinnedDirectory(
     const int existing = pinnedPaths.indexOf(clean);
     if (existing >= 0)
     {
+        // Context-menu Pin of an already-pinned path is a no-op (index == -1).
+        // A drop onto a new slot reorders the existing pin instead of duplicating.
         if (index < 0)
         {
             return;
@@ -122,7 +136,10 @@ void PinnedListWidget::removePinnedDirectory(const QString &path)
         return;
     }
 
+    // Persist immediately so a crash during the height animation does not
+    // restore the pin. The color entry is dropped with the path.
     pinnedPaths.removeAt(index);
+    pinColors.remove(clean);
     PinnedItemWidget *item = pinWidgets.takeAt(index);
     savePins();
     animateRemoval(item);
@@ -133,6 +150,8 @@ bool PinnedListWidget::containsPath(const QString &path) const
     return pinnedPaths.contains(canonicalPinPath(path));
 }
 
+// Accept either one local directory URL or an internal pin reorder payload.
+// Multiple URLs, files, and remote URLs are rejected.
 PinnedListWidget::DropKind PinnedListWidget::classifyDrop(
     const QMimeData *mime,
     QString *outPath
@@ -190,6 +209,9 @@ PinnedListWidget::DropKind PinnedListWidget::classifyDrop(
     return DropKind::ExternalDirectory;
 }
 
+// Compare the cursor against each pin's vertical midpoint.
+// Above the center of row i inserts at i; below the last row appends.
+// The placeholder is skipped because it is not in pinWidgets.
 int PinnedListWidget::insertionIndexForY(int y) const
 {
     int index = 0;
@@ -221,6 +243,7 @@ void PinnedListWidget::showDropPlaceholder(int index)
 
     dropPlaceholder->show();
 
+    // Moving to a new index while already open must not restart 0→32.
     if (dropPlaceholder->maximumHeight() >= kPlaceholderEndHeight)
     {
         return;
@@ -248,6 +271,7 @@ void PinnedListWidget::hideDropPlaceholder()
     placeholderAnimation->start();
 }
 
+// Used on drop so the real pin can occupy the gap without waiting.
 void PinnedListWidget::hideDropPlaceholderImmediate()
 {
     placeholderAnimation->stop();
@@ -277,10 +301,20 @@ void PinnedListWidget::insertPinWidget(
         this,
         &PinnedListWidget::removePinnedDirectory
     );
+    connect(
+        item,
+        &PinnedItemWidget::iconColorChanged,
+        this,
+        &PinnedListWidget::setStoredIconColor
+    );
+
+    item->setIconColor(pinColors.value(cleanPath));
 
     pinnedPaths.insert(index, cleanPath);
     pinWidgets.insert(index, item);
 
+    // Layout index matches pin index unless the placeholder is sitting
+    // at or before that slot.
     int layoutIndex = index;
     const int placeholderIndex = pinsLayout->indexOf(dropPlaceholder);
     if (placeholderIndex >= 0 && placeholderIndex <= index)
@@ -297,6 +331,8 @@ void PinnedListWidget::reorderPin(int from, int to)
         return;
     }
 
+    // `to` is an insertion index from before the source was removed.
+    // Moving downward must decrement so the item is not skipped.
     int destination = to;
     if (destination > from)
     {
@@ -332,6 +368,8 @@ void PinnedListWidget::reorderPin(int from, int to)
 
 void PinnedListWidget::animateRemoval(PinnedItemWidget *item)
 {
+    // Collapse the row in place, then destroy it. The path is already gone
+    // from pinnedPaths so the list order is correct during the animation.
     item->setMinimumHeight(0);
 
     auto *animation =
@@ -349,15 +387,72 @@ void PinnedListWidget::animateRemoval(PinnedItemWidget *item)
     animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
+void PinnedListWidget::setStoredIconColor(
+    const QString &path,
+    const QColor &color
+)
+{
+    const QString clean = canonicalPinPath(path);
+    if (clean.isEmpty())
+    {
+        return;
+    }
+
+    if (color.isValid())
+    {
+        pinColors.insert(clean, color);
+    }
+    else
+    {
+        // Default / cleared tint is stored as "no entry", not a hex value.
+        pinColors.remove(clean);
+    }
+
+    savePins();
+}
+
 void PinnedListWidget::savePins()
 {
     QSettings settings(kSettingsOrganization, kSettingsApplication);
     settings.setValue(kPinnedDirectoriesKey, pinnedPaths);
+
+    // Only write colors for paths that are still pinned. Default (untinted)
+    // pins are omitted so the map stays small.
+
+    QVariantMap colorMap;
+    for (const QString &path : pinnedPaths)
+    {
+        if (!pinColors.contains(path))
+        {
+            continue;
+        }
+
+        colorMap.insert(
+            path,
+            pinColors.value(path).name(QColor::HexRgb)
+        );
+    }
+    settings.setValue(kPinnedDirectoryColorsKey, colorMap);
 }
 
 void PinnedListWidget::loadPins()
 {
     QSettings settings(kSettingsOrganization, kSettingsApplication);
+    // Colors are keyed by path and applied when each row is created.
+    const QVariantMap colorMap =
+        settings.value(kPinnedDirectoryColorsKey).toMap();
+    for (auto it = colorMap.cbegin(); it != colorMap.cend(); ++it)
+    {
+        const QString clean = canonicalPinPath(it.key());
+        const QColor color(it.value().toString());
+        if (!clean.isEmpty() && color.isValid())
+        {
+            pinColors.insert(clean, color);
+        }
+    }
+
+    // Paths that no longer exist are still inserted. The row shows a warning
+    // icon until the user clicks it (silent unpin) or the directory returns.
     const QStringList saved =
         settings.value(kPinnedDirectoriesKey).toStringList();
 
@@ -378,6 +473,7 @@ void PinnedListWidget::dragEnterEvent(QDragEnterEvent *event)
     QString path;
     if (classifyDrop(event->mimeData(), &path) == DropKind::None)
     {
+        // Ignoring keeps the forbidden cursor for files and multi-drops.
         event->ignore();
         return;
     }
@@ -403,6 +499,8 @@ void PinnedListWidget::dragMoveEvent(QDragMoveEvent *event)
 
     const int newIndex =
         insertionIndexForY(event->position().toPoint().y());
+    // dragMoveEvent fires continuously. Only move the placeholder when the
+    // insertion slot actually changes, or the animation jitters.
     if (newIndex == currentDropIndex)
     {
         return;
@@ -416,6 +514,8 @@ void PinnedListWidget::dragLeaveEvent(QDragLeaveEvent *event)
 {
     QWidget::dragLeaveEvent(event);
 
+    // Qt sends dragLeave when the cursor enters a child pin row. Defer the
+    // check so a still-inside drag does not collapse the placeholder.
     QTimer::singleShot(
         0,
         this,

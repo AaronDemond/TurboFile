@@ -1,11 +1,13 @@
 #include "pinneditemwidget.h"
+#include "pincolorpresets.h"
 #include "pinnedconstants.h"
+#include "pinnedfoldericon.h"
 #include "pinnedpath.h"
 
 #include <QApplication>
+#include <QColorDialog>
 #include <QDrag>
 #include <QEnterEvent>
-#include <QFileIconProvider>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
@@ -13,8 +15,11 @@
 #include <QMouseEvent>
 #include <QPalette>
 #include <QStyle>
-#include <QUrl>
 
+// Visual pin row. Reports clicks, unpin, color, and internal drags.
+// Persistence and list order stay in PinnedListWidget.
+
+// Build a compact pin row: folder icon + directory name.
 PinnedItemWidget::PinnedItemWidget(
     const QString &path,
     QWidget *parent
@@ -30,6 +35,7 @@ PinnedItemWidget::PinnedItemWidget(
     setFocusPolicy(Qt::NoFocus);
     setAutoFillBackground(true);
     setContextMenuPolicy(Qt::CustomContextMenu);
+    // Full path is always available on hover even when the label is short.
     setToolTip(m_path);
 
     auto *layout = new QHBoxLayout(this);
@@ -50,13 +56,15 @@ PinnedItemWidget::PinnedItemWidget(
     layout->addWidget(iconLabel);
     layout->addWidget(nameLabel, 1);
 
+    // Right-click is handled here so the item can offer Unpin and Color
+    // without the list widget knowing about menus.
     connect(
         this,
         &QWidget::customContextMenuRequested,
         this,
         [this](const QPoint &position)
         {
-            showUnpinMenu(mapToGlobal(position));
+            showContextMenu(mapToGlobal(position));
         }
     );
 
@@ -74,29 +82,41 @@ void PinnedItemWidget::refreshAvailability()
     applyAppearance();
 }
 
+// Does not emit iconColorChanged. Callers that persist must emit themselves,
+// or go through applyColorAction.
+void PinnedItemWidget::setIconColor(const QColor &color)
+{
+    m_iconColor = color.isValid() ? color : QColor();
+    applyAppearance();
+}
+
+QColor PinnedItemWidget::iconColor() const
+{
+    return m_iconColor;
+}
+
 void PinnedItemWidget::applyAppearance()
 {
     available = isAvailableDirectory(m_path);
     nameLabel->setText(pinDisplayName(m_path));
+    setToolTip(m_path);
 
-    if (available)
+    // Missing directories keep the warning icon. The stored tint is unchanged
+    // and will apply again if the path becomes available.
+    if (!available)
     {
-        QFileIconProvider icons;
         iconLabel->setPixmap(
-            icons.icon(QFileIconProvider::Folder).pixmap(16, 16)
+            style()->standardIcon(QStyle::SP_MessageBoxWarning).pixmap(16, 16)
         );
-        nameLabel->setEnabled(true);
-        setToolTip(m_path);
+        nameLabel->setEnabled(false);
         return;
     }
 
-    iconLabel->setPixmap(
-        style()->standardIcon(QStyle::SP_MessageBoxWarning).pixmap(16, 16)
-    );
-    nameLabel->setEnabled(false);
-    setToolTip(m_path);
+    iconLabel->setPixmap(pinFolderIcon(m_iconColor, 16));
+    nameLabel->setEnabled(true);
 }
 
+// Hover fill uses palette roles so the row follows the desktop theme.
 void PinnedItemWidget::setHovered(bool hovered)
 {
     QPalette pal = palette();
@@ -111,16 +131,74 @@ void PinnedItemWidget::setHovered(bool hovered)
     setPalette(pal);
 }
 
-void PinnedItemWidget::showUnpinMenu(const QPoint &globalPos)
+void PinnedItemWidget::showContextMenu(const QPoint &globalPos)
 {
     QMenu menu(this);
     QAction *unpinAction = menu.addAction(tr("Unpin"));
-    if (menu.exec(globalPos) == unpinAction)
+    menu.addSeparator();
+    addPinColorMenu(&menu, m_iconColor);
+
+    QAction *chosen = menu.exec(globalPos);
+    if (chosen == nullptr)
+    {
+        return;
+    }
+
+    if (chosen == unpinAction)
     {
         emit unpinRequested(m_path);
+        return;
     }
+
+    applyColorAction(chosen);
 }
 
+// Interpret a Color submenu action and persist through iconColorChanged.
+void PinnedItemWidget::applyColorAction(QAction *action)
+{
+    const QString role =
+        action->property("pinColorRole").toString();
+    if (role.isEmpty())
+    {
+        return;
+    }
+
+    QColor chosen = m_iconColor;
+    if (role == QLatin1String("default"))
+    {
+        chosen = QColor();
+    }
+    else if (role == QLatin1String("preset"))
+    {
+        chosen = action->data().value<QColor>();
+    }
+    else if (role == QLatin1String("custom"))
+    {
+        // Cancel leaves the previous color. An invalid dialog result is not
+        // treated as Default.
+        const QColor initial =
+            m_iconColor.isValid() ? m_iconColor : Qt::blue;
+        const QColor picked = QColorDialog::getColor(
+            initial,
+            this,
+            tr("Folder color")
+        );
+        if (!picked.isValid())
+        {
+            return;
+        }
+        chosen = picked;
+    }
+    else
+    {
+        return;
+    }
+
+    setIconColor(chosen);
+    emit iconColorChanged(m_path, m_iconColor);
+}
+
+// Internal reorder drag. The list widget prefers this MIME type over URLs.
 void PinnedItemWidget::startDrag()
 {
     auto *mime = new QMimeData;
@@ -143,6 +221,8 @@ void PinnedItemWidget::mousePressEvent(QMouseEvent *event)
     QFrame::mousePressEvent(event);
 }
 
+// Start a drag only after the cursor has moved the platform drag distance,
+// so a normal click still activates the pin.
 void PinnedItemWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (!pressed || !(event->buttons() & Qt::LeftButton))
@@ -168,6 +248,8 @@ void PinnedItemWidget::mouseReleaseEvent(QMouseEvent *event)
     {
         pressed = false;
 
+        // Re-check on click so a remounted drive navigates instead of
+        // remaining dimmed. A still-missing pin is removed silently.
         if (isAvailableDirectory(m_path))
         {
             applyAppearance();

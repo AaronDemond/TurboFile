@@ -19,6 +19,8 @@ public:
     );
 
 protected:
+    // Intercept the press rather than reacting to sectionClicked afterward.
+    // This prevents Qt from activating an incomplete Size sort even briefly.
     void mousePressEvent(QMouseEvent *event) override;
 
 private:
@@ -26,8 +28,13 @@ private:
     // or more directory or mounted-drive totals pending again.
     void restoreLastStableSort();
 
+    // Both pointers are borrowed. The tree owns this header, and MainWindow
+    // keeps the shared proxy alive longer than every per-tab tree and header.
     QTreeView *fileTreeView;
     DirectorySizeSortProxyModel *fileModel;
+
+    // Each tab remembers its own last usable ordering. The defaults match the
+    // initial Name-ascending sort configured when the tree is created.
     int lastSortColumn = 0;
     Qt::SortOrder lastSortOrder = Qt::AscendingOrder;
 };

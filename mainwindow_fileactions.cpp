@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "directorysizesortproxymodel.h"
 #include "sidebar/pinnedsidebar.h"
+#include "shellscriptdialog.h"
 
 #include <QTreeView>
 #include <QItemSelectionModel>
@@ -22,6 +23,8 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QLineEdit>
+#include <QProcess>
+#include <QStandardPaths>
 
 
 // -------------------------------------------------
@@ -77,6 +80,8 @@ void MainWindow::showFileContextMenu(
         QAction *openAction =
             menu.addAction("Open");
 
+        // Pin is offered only for a single unpinned directory. Files and
+        // multi-selections stay out of the sidebar.
         QAction *pinAction = nullptr;
         if (selectedPaths.size() == 1)
         {
@@ -89,8 +94,35 @@ void MainWindow::showFileContextMenu(
             }
         }
 
+        menu.addSeparator();
+
+        // Creation targets the directory displayed by the tab rather than
+        // the right-clicked item. A submenu keeps the two creation choices
+        // grouped without making the main context menu unnecessarily long.
+        QMenu *createNewMenu =
+            menu.addMenu("Create New");
+
+        QAction *newFileAction =
+            createNewMenu->addAction("File");
+
+        QAction *newFolderAction =
+            createNewMenu->addAction("Folder");
+
+        QAction *openTerminalAction =
+            menu.addAction("Open Terminal Here");
+
+        QAction *runShellScriptAction =
+            menu.addAction("Run Shell script here");
+
+        menu.addSeparator();
+
         QAction *copyAction =
             menu.addAction("Copy");
+
+        // Duplicate operates on the complete preserved selection and creates
+        // each copy beside its source with the existing unique-name helper.
+        QAction *duplicateAction =
+            menu.addAction("Duplicate Here");
 
         QAction *renameAction =
             menu.addAction("Rename");
@@ -132,9 +164,29 @@ void MainWindow::showFileContextMenu(
         {
             pinnedSidebar->pinDirectory(selectedPaths.first());
         }
+        else if (selectedAction == newFileAction)
+        {
+            createNewFile(page);
+        }
+        else if (selectedAction == newFolderAction)
+        {
+            createNewFolder(page);
+        }
+        else if (selectedAction == openTerminalAction)
+        {
+            openTerminalHere(page);
+        }
+        else if (selectedAction == runShellScriptAction)
+        {
+            runShellScriptHere(page);
+        }
         else if (selectedAction == copyAction)
         {
             copySelectedItemsToClipboard(page);
+        }
+        else if (selectedAction == duplicateAction)
+        {
+            duplicateSelectedItems(page);
         }
         else if (selectedAction == renameAction)
         {
@@ -156,10 +208,25 @@ void MainWindow::showFileContextMenu(
     // EMPTY SPACE
     // -------------------------------------------------
 
-    // If the user right-clicked empty space, there
-    // isn't a file to Open/Copy/Rename/Delete.
-    //
-    // Paste still makes sense, though.
+    // Empty space has no item-specific actions, but creating, opening a
+    // terminal, and pasting all target the tab's displayed directory.
+    QMenu *createNewMenu =
+        menu.addMenu("Create New");
+
+    QAction *newFileAction =
+        createNewMenu->addAction("File");
+
+    QAction *newFolderAction =
+        createNewMenu->addAction("Folder");
+
+    QAction *openTerminalAction =
+        menu.addAction("Open Terminal Here");
+
+    QAction *runShellScriptAction =
+        menu.addAction("Run Shell script here");
+
+    menu.addSeparator();
+
     QAction *pasteAction =
         menu.addAction("Paste");
 
@@ -176,9 +243,386 @@ void MainWindow::showFileContextMenu(
                 ->mapToGlobal(position)
         );
 
-    if (selectedAction == pasteAction)
+    if (selectedAction == newFileAction)
+    {
+        createNewFile(page);
+    }
+    else if (selectedAction == newFolderAction)
+    {
+        createNewFolder(page);
+    }
+    else if (selectedAction == openTerminalAction)
+    {
+        openTerminalHere(page);
+    }
+    else if (selectedAction == runShellScriptAction)
+    {
+        runShellScriptHere(page);
+    }
+    else if (selectedAction == pasteAction)
     {
         pasteClipboardItems(page);
+    }
+}
+
+// -------------------------------------------------
+// CREATE / TERMINAL / DUPLICATE
+// -------------------------------------------------
+
+QString MainWindow::currentDirectoryPath(QWidget *page) const
+{
+    // The page pointer is the stable key for per-tab state even when users
+    // reorder tabs and their numeric QTabWidget indexes change.
+    auto stateIterator =
+        tabStates.constFind(page);
+
+    if (stateIterator == tabStates.constEnd())
+    {
+        return QString();
+    }
+
+    // The tree's root index represents the directory currently displayed in
+    // this tab. filePath() maps the proxy index back to a real path.
+    QModelIndex rootIndex =
+        stateIterator->fileTreeView->rootIndex();
+
+    return fileModel->filePath(rootIndex);
+}
+
+void MainWindow::createNewFile(QWidget *page)
+{
+    QString directoryPath =
+        currentDirectoryPath(page);
+
+    if (directoryPath.isEmpty())
+    {
+        return;
+    }
+
+    bool accepted = false;
+
+    // Ask only for one filename because the destination directory is already
+    // determined by the tab where the context menu was opened.
+    QString fileName =
+        QInputDialog::getText(
+            this,
+            "Create New File",
+            "File name:",
+            QLineEdit::Normal,
+            QString(),
+            &accepted
+        ).trimmed();
+
+    if (!accepted || fileName.isEmpty())
+    {
+        return;
+    }
+
+    // A single context-menu operation creates one item in the current folder,
+    // so path separators and the special dot directory names are invalid.
+    if (
+        fileName.contains('/') ||
+        fileName == "." ||
+        fileName == ".."
+    )
+    {
+        QMessageBox::warning(
+            this,
+            "Invalid File Name",
+            "Enter a single file name without '/'."
+        );
+        return;
+    }
+
+    QString filePath =
+        QDir(directoryPath).filePath(fileName);
+    QFile file(filePath);
+
+    // NewOnly makes existence checking and creation one atomic operation. It
+    // prevents an existing item from being overwritten between two calls.
+    if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+    {
+        QMessageBox::warning(
+            this,
+            "Create File Failed",
+            QString(
+                "Could not create:\n%1"
+            ).arg(filePath)
+        );
+        return;
+    }
+
+    file.close();
+
+    // The new zero-byte file changes every cached ancestor directory total,
+    // even though its own byte contribution is currently zero.
+    fileModel->invalidatePaths({filePath});
+}
+
+void MainWindow::createNewFolder(QWidget *page)
+{
+    QString directoryPath =
+        currentDirectoryPath(page);
+
+    if (directoryPath.isEmpty())
+    {
+        return;
+    }
+
+    bool accepted = false;
+
+    QString folderName =
+        QInputDialog::getText(
+            this,
+            "Create New Folder",
+            "Folder name:",
+            QLineEdit::Normal,
+            QString(),
+            &accepted
+        ).trimmed();
+
+    if (!accepted || folderName.isEmpty())
+    {
+        return;
+    }
+
+    if (
+        folderName.contains('/') ||
+        folderName == "." ||
+        folderName == ".."
+    )
+    {
+        QMessageBox::warning(
+            this,
+            "Invalid Folder Name",
+            "Enter a single folder name without '/'."
+        );
+        return;
+    }
+
+    QDir directory(directoryPath);
+    QString folderPath =
+        directory.filePath(folderName);
+
+    // mkdir() creates exactly one child directory and fails rather than
+    // silently accepting an existing item with the same name.
+    if (!directory.mkdir(folderName))
+    {
+        QMessageBox::warning(
+            this,
+            "Create Folder Failed",
+            QString(
+                "Could not create:\n%1"
+            ).arg(folderPath)
+        );
+        return;
+    }
+
+    fileModel->invalidatePaths({folderPath});
+}
+
+void MainWindow::openTerminalHere(QWidget *page)
+{
+    QString directoryPath =
+        currentDirectoryPath(page);
+
+    // A directory can disappear after the tab navigates to it but before the
+    // context-menu action runs. Refuse to launch a terminal that may silently
+    // fall back to an unrelated working directory.
+    if (
+        directoryPath.isEmpty() ||
+        !QDir(directoryPath).exists()
+    )
+    {
+        QMessageBox::warning(
+            this,
+            "Open Terminal Failed",
+            "The current directory no longer exists."
+        );
+        return;
+    }
+
+    // Try the desktop's generic launcher first, followed by common terminal
+    // applications. startDetached() receives the directory separately so the
+    // shell starts there without path quoting or command-string parsing.
+    const QStringList terminalCandidates =
+        {
+            "x-terminal-emulator",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "mate-terminal",
+            "lxterminal",
+            "xterm"
+        };
+
+    for (const QString &candidate : terminalCandidates)
+    {
+        QString executable =
+            QStandardPaths::findExecutable(candidate);
+
+        if (executable.isEmpty())
+        {
+            continue;
+        }
+
+        if (
+            QProcess::startDetached(
+                executable,
+                QStringList(),
+                directoryPath
+            )
+        )
+        {
+            return;
+        }
+    }
+
+    QMessageBox::warning(
+        this,
+        "Open Terminal Failed",
+        "No supported terminal application could be started."
+    );
+}
+
+void MainWindow::runShellScriptHere(QWidget *page)
+{
+    QString directoryPath =
+        currentDirectoryPath(page);
+
+    // Resolve and validate the tab root before opening the editor. This keeps
+    // the displayed working directory truthful if the folder was removed
+    // after the tab originally navigated there.
+    if (
+        directoryPath.isEmpty() ||
+        !QDir(directoryPath).exists()
+    )
+    {
+        QMessageBox::warning(
+            this,
+            "Run Shell Script Failed",
+            "The current directory no longer exists."
+        );
+        return;
+    }
+
+    // The dialog is stack-owned by this function and executes its own modal
+    // event loop. QProcess remains asynchronous, so editing, output updates,
+    // and Stop continue responding while Bash is running.
+    ShellScriptDialog dialog(directoryPath, this);
+
+    connect(
+        &dialog,
+        &ShellScriptDialog::scriptFinished,
+        this,
+        [this, directoryPath]()
+        {
+            // Shell code can modify any nested path without going through
+            // TurboFile's normal action methods. Invalidating the working
+            // directory clears its cached descendants and ancestor totals.
+            fileModel->invalidatePaths({directoryPath});
+        }
+    );
+
+    dialog.exec();
+}
+
+void MainWindow::duplicateSelectedItems(QWidget *page)
+{
+    auto stateIterator =
+        tabStates.constFind(page);
+
+    if (stateIterator == tabStates.constEnd())
+    {
+        return;
+    }
+
+    QStringList sourcePaths =
+        selectedFilePaths(stateIterator->fileTreeView);
+
+    if (sourcePaths.isEmpty())
+    {
+        return;
+    }
+
+    QStringList failedPaths;
+    QStringList createdPaths;
+
+    // Every source is copied into its own parent directory. This remains
+    // correct even if a future view permits selections spanning directories.
+    for (const QString &sourcePath : sourcePaths)
+    {
+        QFileInfo sourceInfo(sourcePath);
+
+        if (!sourceInfo.exists())
+        {
+            failedPaths.append(sourcePath);
+            continue;
+        }
+
+        QString destinationPath =
+            makeUniqueCopyPath(
+                sourcePath,
+                sourceInfo.absolutePath()
+            );
+
+        if (!copyRecursively(sourcePath, destinationPath))
+        {
+            // Recursive copying can fail after creating part of a directory.
+            // Remove only that newly generated destination so the failed
+            // action does not leave an incomplete duplicate in the file view.
+            QFileInfo destinationInfo(destinationPath);
+
+            if (
+                destinationInfo.isSymbolicLink() ||
+                destinationInfo.isFile()
+            )
+            {
+                QFile::remove(destinationPath);
+            }
+            else if (destinationInfo.isDir())
+            {
+                QDir(destinationPath).removeRecursively();
+            }
+
+            failedPaths.append(sourcePath);
+            continue;
+        }
+
+        createdPaths.append(destinationPath);
+    }
+
+    // Batch invalidation avoids repeatedly cancelling and rescheduling the
+    // same parent directory while several selected items are duplicated.
+    fileModel->invalidatePaths(createdPaths);
+
+    if (!failedPaths.isEmpty())
+    {
+        QString failureMessage;
+
+        if (failedPaths.size() == 1)
+        {
+            failureMessage =
+                QString(
+                    "Could not duplicate:\n%1"
+                ).arg(failedPaths.first());
+        }
+        else
+        {
+            failureMessage =
+                QString(
+                    "%1 items could not be duplicated.\n\nFirst failure:\n%2"
+                ).arg(
+                    QString::number(failedPaths.size()),
+                    failedPaths.first()
+                );
+        }
+
+        QMessageBox::warning(
+            this,
+            "Duplicate Failed",
+            failureMessage
+        );
     }
 }
 
@@ -392,6 +836,8 @@ void MainWindow::pasteClipboardItems(
                 "Paste Failed",
                 QString("Could not copy:\n%1").arg((sourcePath)));   
         } else {
+            // The destination and all cached ancestors may now have different
+            // totals. The model also clears cached descendants when needed.
             fileModel->invalidatePaths({destinationPath});
         }
     }
@@ -401,6 +847,17 @@ void MainWindow::pasteClipboardItems(
 
 bool MainWindow::copyRecursively(const QString &sourcePath, const QString &destinationPath) {
     QFileInfo sourceInfo(sourcePath);
+
+    // Handle symbolic links before asking whether their targets exist or are
+    // directories. Copying a link as a directory could recurse through a
+    // Windows junction or Linux symlink cycle; QFile::link preserves a link
+    // to the same resolved target instead.
+    if (sourceInfo.isSymbolicLink()){
+        return QFile::link(
+            sourceInfo.symLinkTarget(),
+            destinationPath
+        );
+    }
 
     // source dissapeared
     if (!sourceInfo.exists()){

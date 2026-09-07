@@ -13,12 +13,22 @@ qt_add_executable(TurboFIle
     mainwindow_tabs.cpp
     mainwindow_fileactions.cpp
     mainwindow_fileview.cpp
+
+    # The source model calculates directory sizes in the background, the proxy
+    # provides directory-first sorting, and the header gates incomplete sorts.
     directorysizefilesystemmodel.cpp
     directorysizefilesystemmodel.h
     directorysizeheaderview.cpp
     directorysizeheaderview.h
     directorysizesortproxymodel.cpp
     directorysizesortproxymodel.h
+
+    # Highlighted Bash editor and asynchronous process runner opened from the
+    # file-view context menu.
+    shellscriptdialog.cpp
+    shellscriptdialog.h
+
+    # Window-level pinned-directory sidebar.
     sidebar/pinnedsidebar.cpp
     sidebar/pinnedsidebar.h
     sidebar/pinnedlistwidget.cpp
@@ -27,6 +37,9 @@ qt_add_executable(TurboFIle
     sidebar/pinneditemwidget.h
     sidebar/pinnedpath.h
     sidebar/pinnedconstants.h
+    sidebar/pinnedfoldericon.cpp
+    sidebar/pinnedfoldericon.h
+    sidebar/pincolorpresets.h
     mainwindow.h
     mainwindow.ui
 )

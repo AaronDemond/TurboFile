@@ -17,6 +17,9 @@ DirectorySizeFileSystemModel::DirectorySizeFileSystemModel(QObject *parent)
     // Recursive directory scans are disk-bound. Two workers allow progress on
     // separate directories without overwhelming the storage device.
     workerPool.setMaxThreadCount(2);
+
+    // QFileSystemModel watches loaded directories for external changes. Its
+    // signals are translated into cache invalidations in the model/UI thread.
     connectFilesystemInvalidationSignals();
 }
 
@@ -34,6 +37,8 @@ DirectorySizeFileSystemModel::~DirectorySizeFileSystemModel()
         }
     }
 
+    // Prevent queued work from starting, remove runnables that have not begun,
+    // and wait only for the at-most-two active workers to observe cancellation.
     queuedTasks.clear();
     workerPool.clear();
     workerPool.waitForDone();
@@ -54,6 +59,8 @@ QVariant DirectorySizeFileSystemModel::data(
         return QFileSystemModel::data(index, role);
     }
 
+    // QFileSystemModel resolves the source index to filesystem metadata. This
+    // remains on the UI thread and does not perform recursive traversal.
     QFileInfo info = fileInfo(index);
 
     // Symbolic links are deliberately not traversed because they can create
@@ -65,9 +72,13 @@ QVariant DirectorySizeFileSystemModel::data(
 
     if (!info.isDir())
     {
+        // Regular files already have a cheap numeric size supplied by Qt, so
+        // preserve the framework's display formatting for those rows.
         return QFileSystemModel::data(index, role);
     }
 
+    // Absolute, cleaned paths let multiple tabs looking at the same directory
+    // share one cache entry and one background calculation.
     QString path = normalizedPath(info.absoluteFilePath());
     auto cacheIterator = sizeCache.constFind(path);
 
@@ -91,18 +102,24 @@ QVariant DirectorySizeFileSystemModel::data(
         return "...";
     }
 
+    // The const reference avoids copying the shared cancellation token while
+    // this UI-thread lookup selects the text for the current cache state.
     const CacheEntry &entry = cacheIterator.value();
 
     if (entry.state == CacheState::Pending)
     {
+        // Pending covers both FIFO-queued and actively running calculations.
         return "...";
     }
 
     if (entry.state == CacheState::Unavailable)
     {
+        // A completed but unreadable or invalid root has no sortable total.
         return "--";
     }
 
+    // Formatting is intentionally deferred until painting. The cache retains
+    // raw bytes for numeric sorting and avoids parsing presentation strings.
     QString sizeText = formattedSize(entry.bytes);
 
     // A leading tilde distinguishes a best-effort result from a complete
@@ -119,11 +136,14 @@ bool DirectorySizeFileSystemModel::directorySizeReady(
     const QModelIndex &index
 ) const
 {
+    // Invalid indexes do not represent a directory that can block sorting.
     if (!index.isValid())
     {
         return true;
     }
 
+    // Files already have synchronous sizes, and symbolic-link directories are
+    // terminal "--" rows because the worker deliberately never follows them.
     QFileInfo info = fileInfo(index);
 
     if (!info.isDir() || info.isSymbolicLink())
@@ -131,6 +151,8 @@ bool DirectorySizeFileSystemModel::directorySizeReady(
         return true;
     }
 
+    // A directory is sortable only after it has either a Ready byte count or
+    // a terminal Unavailable state. Missing and Pending entries both block.
     QString path = normalizedPath(info.absoluteFilePath());
     auto cacheIterator = sizeCache.constFind(path);
 
@@ -144,11 +166,15 @@ bool DirectorySizeFileSystemModel::directorySize(
     qint64 *bytes
 ) const
 {
+    // The output pointer makes availability explicit: false means callers
+    // must use a fallback comparison rather than treating zero as the size.
     if (!index.isValid() || bytes == nullptr)
     {
         return false;
     }
 
+    // Sorting receives source-model indexes, so filePath() can be called
+    // directly without proxy mapping at this layer.
     QString path = normalizedPath(filePath(index));
     auto cacheIterator = sizeCache.constFind(path);
 
@@ -160,6 +186,8 @@ bool DirectorySizeFileSystemModel::directorySize(
         return false;
     }
 
+    // Copy only the numeric total. Presentation details such as '~' belong to
+    // data(), not the sorting comparator.
     *bytes = cacheIterator->bytes;
     return true;
 }
@@ -168,6 +196,8 @@ void DirectorySizeFileSystemModel::requestDirectorySize(
     const QModelIndex &index
 )
 {
+    // Header-triggered prefetching may inspect every child row. Ignore invalid
+    // rows, regular files, and links because none need recursive background work.
     if (!index.isValid())
     {
         return;
@@ -180,6 +210,8 @@ void DirectorySizeFileSystemModel::requestDirectorySize(
         return;
     }
 
+    // ensureDirectorySizeRequested() owns deduplication, so this public entry
+    // point is safe even when painting already requested the same directory.
     ensureDirectorySizeRequested(
         normalizedPath(info.absoluteFilePath())
     );
@@ -189,6 +221,8 @@ void DirectorySizeFileSystemModel::invalidatePaths(
     const QStringList &paths
 )
 {
+    // Normalize all caller-provided paths before comparison. Empty paths can
+    // arise from invalid model parents and must not invalidate the whole cache.
     QStringList normalizedPaths;
 
     for (const QString &path : paths)
@@ -210,6 +244,7 @@ void DirectorySizeFileSystemModel::invalidatePaths(
     // stable sort before pending values enter that comparison.
     emit directorySizesInvalidated();
 
+    // Keep removed keys long enough to repaint any rows that are still visible.
     QStringList invalidatedCachePaths;
 
     // A changed path affects its own cached subtree and every cached ancestor
@@ -235,9 +270,13 @@ void DirectorySizeFileSystemModel::invalidatePaths(
 
         if (iterator->cancellation)
         {
+            // Cancellation is cooperative. Active workers stop between entries;
+            // queued tasks are rejected by their missing cache generation.
             iterator->cancellation->store(true);
         }
 
+        // erase() returns the next valid iterator, allowing removal during the
+        // scan without incrementing an invalidated QHash iterator.
         invalidatedCachePaths.append(iterator.key());
         iterator = sizeCache.erase(iterator);
     }
@@ -254,11 +293,15 @@ void DirectorySizeFileSystemModel::ensureDirectorySizeRequested(
     const QString &path
 )
 {
+    // One cache entry represents one queued or active task. This check also
+    // deduplicates the many queued requests data() may post while repainting.
     if (shuttingDown || sizeCache.contains(path))
     {
         return;
     }
 
+    // The cancellation token is shared with the future worker. No worker owns
+    // or accesses this CacheEntry directly, so cache state remains UI-thread-only.
     CacheEntry entry;
     entry.generation = nextGeneration++;
     entry.cancellation =
@@ -266,17 +309,23 @@ void DirectorySizeFileSystemModel::ensureDirectorySizeRequested(
 
     sizeCache.insert(path, entry);
 
+    // Copy the immutable task snapshot into the FIFO. Its generation binds the
+    // eventual result to this exact cache-entry lifetime.
     SizeTask task;
     task.path = path;
     task.generation = entry.generation;
     task.cancellation = entry.cancellation;
     queuedTasks.enqueue(task);
 
+    // Fill any currently free worker slot immediately; otherwise the FIFO is
+    // resumed when an active task reports completion.
     startQueuedTasks();
 }
 
 void DirectorySizeFileSystemModel::startQueuedTasks()
 {
+    // Queue bookkeeping runs only on the model thread. The loop launches no
+    // more than the pool limit and leaves excess work waiting in FIFO order.
     while (
         !shuttingDown &&
         activeTaskCount < workerPool.maxThreadCount() &&
@@ -296,12 +345,16 @@ void DirectorySizeFileSystemModel::startQueuedTasks()
             continue;
         }
 
+        // Reserve the slot before starting the runnable. finishTask() releases
+        // it on the UI thread after the worker posts its plain-data result.
         activeTaskCount++;
 
         workerPool.start(
             QRunnable::create(
                 [this, task]()
                 {
+                    // Only this pure filesystem traversal runs on the worker.
+                    // It receives a path and atomic token, never a model index.
                     SizeResult result =
                         calculateDirectorySize(
                             task.path,
@@ -330,6 +383,8 @@ void DirectorySizeFileSystemModel::finishTask(
     const SizeResult &result
 )
 {
+    // This method is reached through a queued invocation on the model thread,
+    // so it is safe to mutate the UI-thread-owned cache and scheduler counters.
     activeTaskCount--;
 
     auto cacheIterator = sizeCache.find(task.path);
@@ -342,22 +397,29 @@ void DirectorySizeFileSystemModel::finishTask(
         !result.cancelled
     )
     {
+        // Translate the worker's plain result into the terminal cache state.
+        // A partial result remains Ready because it still has a sortable total.
         cacheIterator->bytes = result.bytes;
         cacheIterator->partial = result.partial;
         cacheIterator->state =
             result.unavailable
                 ? CacheState::Unavailable
                 : CacheState::Ready;
+        // Completed entries no longer need their shared cancellation token.
         cacheIterator->cancellation.reset();
 
+        // Notify every proxy-backed tree that this source Size cell changed.
         refreshSizeCell(task.path);
     }
 
+    // Releasing one slot may allow the next valid FIFO item to begin.
     startQueuedTasks();
 }
 
 void DirectorySizeFileSystemModel::refreshSizeCell(const QString &path)
 {
+    // Resolve the path again rather than retaining a QModelIndex across an
+    // asynchronous job; filesystem model indexes may change during that time.
     QModelIndex nameIndex = index(path);
 
     if (!nameIndex.isValid())
@@ -365,6 +427,8 @@ void DirectorySizeFileSystemModel::refreshSizeCell(const QString &path)
         return;
     }
 
+    // The path lookup returns column 0. Move horizontally to the Size column
+    // while retaining the same row and parent.
     QModelIndex sizeIndex = nameIndex.siblingAtColumn(1);
 
     // Prevent the model's own repaint signal from being mistaken for an
@@ -380,6 +444,7 @@ void DirectorySizeFileSystemModel::refreshSizeCell(const QString &path)
 
 void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
 {
+    // New children change every cached ancestor total containing the parent.
     connect(
         this,
         &QFileSystemModel::rowsInserted,
@@ -390,6 +455,7 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         }
     );
 
+    // Removed children have the same ancestor impact as inserted children.
     connect(
         this,
         &QFileSystemModel::rowsRemoved,
@@ -400,6 +466,7 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         }
     );
 
+    // A move changes totals under both the source and destination branches.
     connect(
         this,
         &QFileSystemModel::rowsMoved,
@@ -421,6 +488,8 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         }
     );
 
+    // QFileSystemModel reports a rename as a directory plus old/new leaf names.
+    // Reconstruct both paths so stale subtree keys and parent totals are cleared.
     connect(
         this,
         &QFileSystemModel::fileRenamed,
@@ -441,6 +510,8 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         }
     );
 
+    // Metadata or content changes can affect a file's size. Convert every row
+    // in the reported range back to column 0 paths before invalidating.
     connect(
         this,
         &QFileSystemModel::dataChanged,
@@ -453,6 +524,8 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         {
             if (emittingSizeChange)
             {
+                // Ignore the Size-cell repaint emitted by refreshSizeCell(); it
+                // represents a cache result, not a new filesystem mutation.
                 return;
             }
 
@@ -473,6 +546,8 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
         }
     );
 
+    // A reset invalidates every QModelIndex and every assumption represented by
+    // the cache. Passing all keys cancels workers and repaints loaded rows.
     connect(
         this,
         &QFileSystemModel::modelReset,
@@ -487,11 +562,15 @@ void DirectorySizeFileSystemModel::connectFilesystemInvalidationSignals()
 
 QString DirectorySizeFileSystemModel::normalizedPath(const QString &path)
 {
+    // Empty paths remain empty so callers can reject them rather than allowing
+    // QFileInfo to reinterpret them as the current working directory.
     if (path.isEmpty())
     {
         return QString();
     }
 
+    // Convert relative spelling and redundant separators into a stable absolute
+    // cache key without resolving symlinks into their targets.
     return QDir::cleanPath(
         QFileInfo(path).absoluteFilePath()
     );
@@ -503,6 +582,8 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
     const std::shared_ptr<std::atomic_bool> &cancellation
 )
 {
+    // Validate the requested root before allocating traversal state. A root
+    // symlink remains unavailable by design because links are never followed.
     SizeResult result;
     QFileInfo rootInfo(path);
 
@@ -527,6 +608,8 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
     // space reported by tools such as df and Windows drive properties. This
     // is constant-time and still runs in the worker so no storage query is
     // introduced into the UI thread.
+    // QStorageInfo identifies both the containing filesystem and its mount root.
+    // Subdirectories on the same filesystem must still use recursive totals.
     QStorageInfo storage(path);
     QByteArray filesystemType =
         storage.fileSystemType().toLower();
@@ -535,6 +618,9 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
     QString requestedPath =
         QDir::cleanPath(rootInfo.absoluteFilePath());
 
+    // Linux drivers report several names for Windows-compatible filesystems.
+    // Matching only these formats prevents native Linux mount roots from
+    // unexpectedly changing from folder totals to whole-filesystem usage.
     bool isWindowsFilesystem =
         filesystemType == "ntfs" ||
         filesystemType == "ntfs3" ||
@@ -551,6 +637,9 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
         requestedPath == storageRoot
     )
     {
+        // bytesAvailable() is the space available to the current user. On these
+        // Windows filesystems it matches the used-space accounting requested by
+        // the application: total capacity minus currently available capacity.
         qint64 totalBytes = storage.bytesTotal();
         qint64 availableBytes = storage.bytesAvailable();
 
@@ -573,12 +662,16 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
 
     while (!pendingDirectories.isEmpty())
     {
+        // Check once before opening each directory so invalidated large scans
+        // can abandon an entire remaining subtree promptly.
         if (cancellation->load())
         {
             result.cancelled = true;
             return result;
         }
 
+        // Taking from the end makes the QStringList an explicit depth-first
+        // stack while keeping recursion off the C++ call stack.
         QString directoryPath = pendingDirectories.takeLast();
         QFileInfo directoryInfo(directoryPath);
 
@@ -588,10 +681,15 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
             !directoryInfo.isReadable()
         )
         {
+            // A nested path may disappear or become unreadable during a scan.
+            // Continue with accessible siblings and mark the final total '~'.
             result.partial = true;
             continue;
         }
 
+        // Include hidden and system entries because they consume space, omit
+        // '.' and '..', and never return symlinks that could form cycles or
+        // count a target through multiple paths.
         QDir directory(directoryPath);
         QFileInfoList entries = directory.entryInfoList(
             QDir::AllEntries |
@@ -603,6 +701,8 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
 
         for (const QFileInfo &entry : entries)
         {
+            // Per-entry checks keep cancellation responsive even inside a very
+            // large directory that has no nested children.
             if (cancellation->load())
             {
                 result.cancelled = true;
@@ -611,20 +711,28 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
 
             if (entry.isDir())
             {
+                // Defer child traversal by pushing its absolute path onto the
+                // worker-local stack. No model or UI object enters the worker.
                 pendingDirectories.append(entry.absoluteFilePath());
                 continue;
             }
 
             if (!entry.isFile())
             {
+                // Sockets, devices, and other special entries do not contribute
+                // regular-file logical bytes and cannot be recursively entered.
                 continue;
             }
 
+            // QFileInfo::size() supplies logical length rather than allocated
+            // blocks, matching the feature's ordinary-directory size definition.
             qint64 fileSize = entry.size();
             qint64 maximumSize = std::numeric_limits<qint64>::max();
 
             if (result.bytes > maximumSize - fileSize)
             {
+                // Saturate instead of allowing signed overflow on unusually
+                // large trees. Additional files leave the total at qint64 max.
                 result.bytes = maximumSize;
             }
             else
@@ -639,6 +747,8 @@ DirectorySizeFileSystemModel::calculateDirectorySize(
 
 QString DirectorySizeFileSystemModel::formattedSize(qint64 bytes)
 {
+    // Traditional units produce familiar binary-scaled labels such as KiB,
+    // MiB, and GiB while QLocale supplies user-appropriate number formatting.
     return QLocale().formattedDataSize(
         bytes,
         1,
@@ -651,16 +761,22 @@ bool DirectorySizeFileSystemModel::pathsOverlap(
     const QString &secondPath
 )
 {
+    // Equality is the simplest overlap: the changed item is itself cached.
     if (firstPath == secondPath)
     {
         return true;
     }
 
+    // Appending a separator makes the relationship component-aware, so a path
+    // such as /home/user does not incorrectly overlap /home/username. Root
+    // already ends in '/', so it must not receive a second separator.
     QString firstPrefix =
         firstPath == "/" ? firstPath : firstPath + '/';
     QString secondPrefix =
         secondPath == "/" ? secondPath : secondPath + '/';
 
+    // Either path may be the changed descendant or the cached ancestor. Cache
+    // invalidation intentionally removes both directions of the relationship.
     return
         firstPath.startsWith(secondPrefix) ||
         secondPath.startsWith(firstPrefix);

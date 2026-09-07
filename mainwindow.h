@@ -11,7 +11,11 @@
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
 class DirectorySizeSortProxyModel;
+// Window-level pinned-directory panel (not per-tab).
 class PinnedSidebar;
+class QCloseEvent;
+class QSplitter;
+class QTimer;
 class QWidget;
 class QTreeView;
 class QLineEdit;
@@ -36,6 +40,10 @@ public:
     // Cleans up the generated UI object owned by this window.
     ~MainWindow();
 
+protected:
+    // Flush the last sidebar width before the window actually closes.
+    void closeEvent(QCloseEvent *event) override;
+
 private:
     // Stores the per-tab widgets and history needed for navigation buttons.
     struct TabState {
@@ -59,8 +67,23 @@ private:
     // Placeholder tab that acts as the trailing new-tab button.
     QWidget *newTabPlaceholder = nullptr;
 
-    // Window-level sidebar of pinned directories.
+    // Window-level sidebar of pinned directories, shared by every tab.
     PinnedSidebar *pinnedSidebar = nullptr;
+    // Horizontal splitter: sidebar | tab widget. Not inside each tab page.
+    QSplitter *sidebarSplitter = nullptr;
+    // Last expanded sidebar width, restored after collapse.
+    int expandedSidebarWidth = 180;
+    // Coalesces QSettings writes so splitterMoved does not hit disk per pixel.
+    QTimer *sidebarLayoutSaveTimer = nullptr;
+
+    // Insert the sidebar, restore width/collapsed, and connect navigation.
+    void setupSidebar();
+    // Apply strip width or expandedSidebarWidth to the splitter.
+    void applySidebarSplitterSizes();
+    // Restart the short save timer; the actual write happens after dragging.
+    void scheduleSidebarLayoutSave();
+    // Write sidebar/width and sidebar/collapsed to QSettings.
+    void saveSidebarLayout();
 
     // Builds a new tab rooted at the supplied directory.
     void createTab(const QString &path);
@@ -156,6 +179,26 @@ private:
     void pasteClipboardItems(
         QWidget *page
     );
+
+    // Create an empty file inside the directory displayed by this tab.
+    void createNewFile(QWidget *page);
+
+    // Create an empty folder inside the directory displayed by this tab.
+    void createNewFolder(QWidget *page);
+
+    // Launch the user's installed terminal with this tab's directory as its
+    // working directory.
+    void openTerminalHere(QWidget *page);
+
+    // Open a highlighted Bash editor and execute its script in this tab's
+    // displayed directory.
+    void runShellScriptHere(QWidget *page);
+
+    // Copy every selected item beside its source using a collision-safe name.
+    void duplicateSelectedItems(QWidget *page);
+
+    // Resolve the filesystem directory represented by a tab's root index.
+    QString currentDirectoryPath(QWidget *page) const;
 
     // Return the filesystem paths represented
     // by the selected rows in a tree.

@@ -16,6 +16,8 @@
 // filesystem-used space, and files retain QFileSystemModel's normal behavior.
 class DirectorySizeFileSystemModel : public QFileSystemModel
 {
+    // Q_OBJECT enables this subclass to publish cache invalidation through a
+    // Qt signal even though the background workers themselves are not QObjects.
     Q_OBJECT
 
 public:
@@ -51,6 +53,9 @@ signals:
     void directorySizesInvalidated();
 
 private:
+    // Each path moves through this small state machine. Pending entries own a
+    // queued or active job, Ready entries contain a usable byte count, and
+    // Unavailable entries completed without a value that can be sorted.
     enum class CacheState
     {
         Pending,
@@ -60,13 +65,30 @@ private:
 
     struct CacheEntry
     {
+        // New entries begin Pending and are replaced by one terminal state
+        // when finishTask() accepts the corresponding worker result.
         CacheState state = CacheState::Pending;
+
+        // The raw byte count remains numeric in the cache so sorting never
+        // needs to parse the human-readable text shown in the tree view.
         qint64 bytes = 0;
+
+        // Partial results are valid best-effort totals. data() marks them with
+        // a leading '~' so users can distinguish them from complete totals.
         bool partial = false;
+
+        // A monotonically increasing generation identifies the exact job
+        // allowed to populate this path after invalidation and rescheduling.
         quint64 generation = 0;
+
+        // The cache and worker share this atomic token. Invalidation can ask a
+        // worker to stop without accessing worker-owned objects or blocking.
         std::shared_ptr<std::atomic_bool> cancellation;
     };
 
+    // A task is a value-only snapshot placed in the FIFO. It deliberately
+    // contains no model index because QModelIndex and model state belong to
+    // the UI thread while the path can safely be used by a worker.
     struct SizeTask
     {
         QString path;
@@ -74,6 +96,9 @@ private:
         std::shared_ptr<std::atomic_bool> cancellation;
     };
 
+    // Workers return plain data through a queued UI-thread callback. Separate
+    // flags preserve the difference between an approximate result, a failed
+    // root, and a calculation intentionally abandoned after invalidation.
     struct SizeResult
     {
         qint64 bytes = 0;
@@ -119,12 +144,33 @@ private:
         const QString &secondPath
     );
 
+    // data() is const because it overrides QAbstractItemModel::data(), but it
+    // performs read-only cache lookups before queueing mutations to the UI
+    // thread. The cache is mutable solely to permit those const lookups.
     mutable QHash<QString, CacheEntry> sizeCache;
+
+    // Waiting tasks remain in insertion order so visible rows are generally
+    // calculated in the same order that their Size cells were requested.
     QQueue<SizeTask> queuedTasks;
+
+    // This model owns a private pool instead of using Qt's global pool, which
+    // prevents slow disk scans from consuming threads needed by other work.
     QThreadPool workerPool;
+
+    // Generations never repeat during one model lifetime, allowing completed
+    // workers to prove that their cache entry has not since been replaced.
     quint64 nextGeneration = 1;
+
+    // Only the UI thread changes queue and cache bookkeeping. Workers return
+    // results through queued calls rather than mutating these members.
     int activeTaskCount = 0;
+
+    // The source model also listens to dataChanged for external filesystem
+    // updates. This guard identifies the repaint signal emitted by this class.
     bool emittingSizeChange = false;
+
+    // Destruction sets this before cancelling work so no new jobs can leave
+    // the FIFO while the worker pool is being drained.
     bool shuttingDown = false;
 };
 

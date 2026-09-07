@@ -17,6 +17,8 @@ class DirectorySizeSortProxyModel : public QSortFilterProxyModel
 public:
     explicit DirectorySizeSortProxyModel(QObject *parent = nullptr);
 
+    // Declaring the inherited overload avoids hiding index(row, column,
+    // parent) when this class adds the convenience index(path, column) form.
     using QSortFilterProxyModel::index;
 
     // Map QFileSystemModel's path APIs through the proxy so existing callers
@@ -42,6 +44,8 @@ signals:
     void directorySizesInvalidated();
 
 protected:
+    // QSortFilterProxyModel passes source-model indexes to this comparator.
+    // Keeping that contract explicit prevents accidental double mapping.
     bool lessThan(
         const QModelIndex &left,
         const QModelIndex &right
@@ -54,7 +58,12 @@ private:
         const QModelIndex &right
     ) const;
 
+    // The proxy owns the source model through QObject parenting. MainWindow
+    // owns only this proxy, while every tab shares both model layers.
     DirectorySizeFileSystemModel *filesystemModel;
+
+    // QCollator provides locale-aware, case-insensitive natural name order
+    // and is reused for primary Name sorts and deterministic tie breaking.
     QCollator nameCollator;
 };
 
