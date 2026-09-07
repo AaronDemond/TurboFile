@@ -13,6 +13,12 @@ qt_add_executable(TurboFIle
     mainwindow_tabs.cpp
     mainwindow_fileactions.cpp
     mainwindow_fileview.cpp
+    directorysizefilesystemmodel.cpp
+    directorysizefilesystemmodel.h
+    directorysizeheaderview.cpp
+    directorysizeheaderview.h
+    directorysizesortproxymodel.cpp
+    directorysizesortproxymodel.h
     mainwindow.h
     mainwindow.ui
 )

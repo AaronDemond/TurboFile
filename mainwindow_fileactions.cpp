@@ -1,6 +1,6 @@
 #include "mainwindow.h"
+#include "directorysizesortproxymodel.h"
 
-#include <QFileSystemModel>
 #include <QTreeView>
 #include <QItemSelectionModel>
 
@@ -367,12 +367,15 @@ void MainWindow::pasteClipboardItems(
 
         }
         
-        // perform the copy
+        // Perform the copy and invalidate directory totals only when the
+        // destination was created successfully.
         if (!copyRecursively(sourcePath, destinationPath)){
             QMessageBox::warning(
                 this,
                 "Paste Failed",
                 QString("Could not copy:\n%1").arg((sourcePath)));   
+        } else {
+            fileModel->invalidatePaths({destinationPath});
         }
     }
 
@@ -589,7 +592,18 @@ void MainWindow::renameSelectedItem(
             "Rename Failed",
             "The item could not be renamed."
         );
+
+        return;
     }
+
+    // Both names are supplied so stale descendants under the old directory
+    // key and parent totals are cleared together.
+    fileModel->invalidatePaths(
+        {
+            oldPath,
+            newPath
+        }
+    );
 }
 
 // -------------------------------------------------
@@ -650,6 +664,7 @@ void MainWindow::deleteSelectedItems(
 
 
     QStringList failedPaths;
+    QStringList deletedPaths;
 
     for (const QString &path : paths)
     {
@@ -657,7 +672,15 @@ void MainWindow::deleteSelectedItems(
         {
             failedPaths.append(path);
         }
+        else
+        {
+            deletedPaths.append(path);
+        }
     }
+
+    // Invalidate all successful deletions as one cache update. Failed paths
+    // still exist, so their cached values remain valid.
+    fileModel->invalidatePaths(deletedPaths);
 
     if (!failedPaths.isEmpty())
     {

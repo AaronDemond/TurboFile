@@ -1,7 +1,6 @@
 #include "mainwindow.h"
-#include "ui_mainwindow.h"
+#include "directorysizesortproxymodel.h"
 
-#include <QFileSystemModel>
 #include <QDir>
 #include <QFileInfo>
 

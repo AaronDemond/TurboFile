@@ -1,8 +1,8 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "directorysizesortproxymodel.h"
 
 // Model and filesystem types used to provide directory contents and tab labels.
-#include <QFileSystemModel>
 #include <QDir>
 #include <QFileInfo>
 
@@ -27,7 +27,7 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , fileModel(new QFileSystemModel(this))
+    , fileModel(new DirectorySizeSortProxyModel(this))
 {
     // Create the widgets declared in mainwindow.ui.
     ui->setupUi(this);

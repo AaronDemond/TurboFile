@@ -10,7 +10,7 @@
 
 // Forward declarations keep the header light and avoid exposing implementation
 // details from the Qt classes used by the window.
-class QFileSystemModel;
+class DirectorySizeSortProxyModel;
 class QWidget;
 class QTreeView;
 class QLineEdit;
@@ -49,8 +49,8 @@ private:
     // The widgets generated from mainwindow.ui.
     Ui::MainWindow *ui;
 
-    // Shared model that provides the filesystem data shown in each tab.
-    QFileSystemModel *fileModel;
+    // Shared proxy that provides filesystem data, lazy sizes, and sorting.
+    DirectorySizeSortProxyModel *fileModel;
 
     // Tracks the state for every browser tab, keyed by the tab page widget.
     QHash<QWidget *, TabState> tabStates;

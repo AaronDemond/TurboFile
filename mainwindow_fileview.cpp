@@ -1,11 +1,12 @@
 #include "mainwindow.h"
+#include "directorysizeheaderview.h"
+#include "directorysizesortproxymodel.h"
 #include <qabstractitemmodel.h>
 #include <qcontainerfwd.h>
 #include <qitemselectionmodel.h>
 #include <qnamespace.h>
 #include <qtreeview.h>
 #include <qheaderview.h>
-#include <qfilesystemmodel.h>
 #include <qabstractitemview.h>
 #include <qitemselectionmodel.h>
 #include <qitemselectionmodel.h>
@@ -15,14 +16,22 @@ void MainWindow::configureFileTreeView (
 ) {
     fileTreeView->setModel(fileModel);
 
+    // This header consumes premature Size clicks before QTreeView can change
+    // the active sort and requests every directory needed by that sort.
+    auto *header =
+        new DirectorySizeHeaderView(
+            fileTreeView,
+            fileModel
+        );
+
+    fileTreeView->setHeader(header);
+
     // set the default width of of the file columns
     // 0 = Name, 1 = Size, 2 = Type, 3 = Date Modified
     fileTreeView->setColumnWidth(0, 255);
     fileTreeView->setColumnWidth(1, 100);
     fileTreeView->setColumnWidth(2, 250);
     fileTreeView->setColumnWidth(3, 170);
-
-    QHeaderView *header = fileTreeView->header();
 
     // configure column sorting
     header->setSectionsClickable(true);
