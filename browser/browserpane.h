@@ -14,13 +14,13 @@ class QPushButton;
 class QEvent;
 class QTreeView;
 
-// One independent file explorer inside a tab.
+// One independent file explorer inside one tab of a pane group.
 //
-// Owns its navigation bar, tree, and browsing history. Tabs may host one
-// or two of these side by side; they share the window's filesystem model
-// but never share history or root indexes. The pane reports activation,
-// split/close requests, path changes, and file drops. It does not persist
-// itself or mutate other panes.
+// Owns its navigation bar, tree, and browsing history. A QTabWidget group may
+// host several BrowserPane pages, and the workspace may place two groups side
+// by side. All panes share the window's filesystem model but never share
+// history or root indexes. The pane reports activation, split/close requests,
+// path changes, and file drops; MainWindow owns structural changes.
 class BrowserPane : public QWidget
 {
     Q_OBJECT
@@ -56,7 +56,8 @@ public:
     void setCloseButtonVisible(bool visible);
 
 signals:
-    // The user interacted with this pane; MainWindow should mark it active.
+    // The user interacted with this pane; MainWindow should mark its tab group
+    // active so Ctrl+T, pins, and actions remain on the correct side.
     void activated();
     void splitRequested();
     void closeRequested();

@@ -14,18 +14,6 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-namespace {
-
-// Same chrome as the original tab navigation buttons so a split pane
-// still reads as part of TurboFile rather than a second widget style.
-const char kPaneButtonStyle[] =
-    "QPushButton { background-color: orange; color: black; border: 1px solid black; }"
-    "QPushButton:hover { background-color: green; }"
-    "QPushButton:pressed { background-color: red }"
-    "QPushButton:disabled {background-color: grey; color: black; border: 1px solid black}";
-
-} // namespace
-
 // Builds the pane's chrome and tree. Navigation happens later through
 // navigateTo() / restoreSession() once MainWindow has stored this pane
 // in TabState.
@@ -58,11 +46,9 @@ BrowserPane::BrowserPane(
     splitButton->setFixedSize(50, 28);
     closeButton->setFixedSize(28, 28);
 
-    backButton->setStyleSheet(QLatin1String(kPaneButtonStyle));
-    forwardButton->setStyleSheet(QLatin1String(kPaneButtonStyle));
-    upButton->setStyleSheet(QLatin1String(kPaneButtonStyle));
-    splitButton->setStyleSheet(QLatin1String(kPaneButtonStyle));
-    closeButton->setStyleSheet(QLatin1String(kPaneButtonStyle));
+    // All toolbar buttons intentionally receive no stylesheet. Qt's active
+    // platform style owns their normal, hover, pressed, focused, and disabled
+    // appearance so every control matches the native widget library.
 
     splitButton->setToolTip(QStringLiteral("Split into two panes"));
     closeButton->setToolTip(QStringLiteral("Close this pane"));
@@ -81,8 +67,8 @@ BrowserPane::BrowserPane(
     rootLayout->addLayout(toolbar);
     rootLayout->addWidget(treeView);
 
-    // Buttons and the path bar belong to this pane, so their slots never
-    // consult another pane's history. That is the whole point of the split.
+    // Buttons and the path bar belong to this pane, so switching either tab
+    // group never causes one BrowserPane to consult another tab's history.
     connect(backButton, &QPushButton::clicked, this, &BrowserPane::goBack);
     connect(forwardButton, &QPushButton::clicked, this, &BrowserPane::goForward);
     connect(upButton, &QPushButton::clicked, this, &BrowserPane::goUp);

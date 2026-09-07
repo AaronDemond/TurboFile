@@ -27,6 +27,30 @@
 #include <QProcess>
 #include <QStandardPaths>
 
+namespace {
+
+constexpr int kCreateItemDialogWidth = 420;
+
+QString promptForItemName(
+    QWidget *parent,
+    const QString &title,
+    const QString &label,
+    bool *accepted
+)
+{
+    QInputDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    dialog.setLabelText(label);
+    dialog.setInputMode(QInputDialog::TextInput);
+    dialog.setTextEchoMode(QLineEdit::Normal);
+    dialog.setMinimumWidth(kCreateItemDialogWidth);
+
+    *accepted = dialog.exec() == QDialog::Accepted;
+    return dialog.textValue();
+}
+
+} // namespace
+
 
 // -------------------------------------------------
 // CONTEXT MENU
@@ -303,12 +327,10 @@ void MainWindow::createNewFile(QWidget *page)
     // Ask only for one filename because the destination directory is already
     // determined by the tab where the context menu was opened.
     QString fileName =
-        QInputDialog::getText(
+        promptForItemName(
             this,
             "Create New File",
             "File name:",
-            QLineEdit::Normal,
-            QString(),
             &accepted
         ).trimmed();
 
@@ -371,12 +393,10 @@ void MainWindow::createNewFolder(QWidget *page)
     bool accepted = false;
 
     QString folderName =
-        QInputDialog::getText(
+        promptForItemName(
             this,
             "Create New Folder",
             "Folder name:",
-            QLineEdit::Normal,
-            QString(),
             &accepted
         ).trimmed();
 

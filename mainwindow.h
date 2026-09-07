@@ -48,12 +48,10 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
-    // One browser tab: a horizontal splitter of independent BrowserPane
-    // explorers. History, path bar, and tree live on each pane, not here.
-    // activePane is the explorer that receives pin clicks and file actions.
+    // One real tab page contains exactly one BrowserPane. The owning tab
+    // widget identifies whether that page belongs to the left or right group.
     struct TabState {
-        QSplitter *paneSplitter = nullptr;
-        QList<BrowserPane *> panes;
+        QTabWidget *tabWidget = nullptr;
         BrowserPane *activePane = nullptr;
     };
 
@@ -63,11 +61,21 @@ private:
     // Shared proxy that provides filesystem data, lazy sizes, and sorting.
     DirectorySizeSortProxyModel *fileModel;
 
-    // Tracks the state for every browser tab, keyed by the tab page widget.
+    // Tracks the pane and owning tab group for every real browser tab page.
     QHash<QWidget *, TabState> tabStates;
 
-    // Placeholder tab that acts as the trailing new-tab button.
-    QWidget *newTabPlaceholder = nullptr;
+    // Horizontal workspace splitter containing one or two independent tab
+    // groups. Each QTabWidget is constrained to its own splitter allocation.
+    QSplitter *browserPaneSplitter = nullptr;
+
+    // Visual left-to-right list of independent tab groups. activeTabWidget is
+    // updated by tab clicks and pane interaction and receives Ctrl+T tabs.
+    QList<QTabWidget *> paneTabWidgets;
+    QTabWidget *activeTabWidget = nullptr;
+
+    // Every group has its own trailing plus placeholder. Mapping by tab widget
+    // prevents one group's plus tab from being mistaken for another's.
+    QHash<QTabWidget *, QWidget *> newTabPlaceholders;
 
     // Window-level sidebar of pinned directories, shared by every tab.
     PinnedSidebar *pinnedSidebar = nullptr;
@@ -87,11 +95,21 @@ private:
     // Write sidebar/width and sidebar/collapsed to QSettings.
     void saveSidebarLayout();
 
-    // Builds a new tab rooted at the supplied directory.
+    // Build a new tab in the active tab group.
     void createTab(const QString &path);
 
-    // Adds the trailing new-tab control to the tab bar.
-    void setupNewTabButton();
+    // Build a new tab in one explicit group. Plus buttons and session restore
+    // use this overload so they never fall back to the left group.
+    QWidget *createTabInGroup(
+        QTabWidget *tabWidget,
+        const QString &path
+    );
+
+    // Configure one independent tab group and its trailing plus control.
+    void setupPaneTabWidget(QTabWidget *tabWidget);
+
+    // Create and register a second tab group inside browserPaneSplitter.
+    QTabWidget *createPaneTabWidget();
 
     // Create a pane, attach the shared model, and wire its signals.
     BrowserPane *createBrowserPane(QWidget *page);
@@ -99,14 +117,15 @@ private:
     // Connect activation, split/close, drops, and the file-view actions.
     void setupPaneConnections(QWidget *page, BrowserPane *pane);
 
-    // Split shows only on a single pane; Close shows only when two exist.
-    void updatePaneChrome(QWidget *page);
+    // Split controls are available with one group; pane-close controls are
+    // available with two. Recompute every pane after structural changes.
+    void updatePaneChrome();
 
-    // Add a second explorer beside the existing one, starting at the
-    // active pane's path. No-op when the tab already has two panes.
+    // Add a second independent tab group beside the active one, starting with
+    // a tab at the requesting pane's path. No-op when two groups already exist.
     void splitPane(QWidget *page);
 
-    // Destroy one explorer. The last pane in a tab cannot be closed.
+    // Close the requesting tab group. The final remaining group cannot close.
     void closePane(QWidget *page, BrowserPane *pane);
 
     // Remember which pane should receive pin clicks and file actions.

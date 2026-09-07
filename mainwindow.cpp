@@ -53,12 +53,11 @@ MainWindow::MainWindow(QWidget *parent)
     // Individual tabs later choose independent root indexes within this model.
     fileModel->setRootPath(QDir::homePath());
 
-    // Allow users to reorder tabs and close all but the last remaining tab.
-    ui->tabWidget->setTabsClosable(true);
-    ui->tabWidget->setMovable(true);
-
-    // Create the permanent trailing plus tab before adding browser tabs.
-    setupNewTabButton();
+    // The Designer tab widget becomes the first independent browser group.
+    // A second QTabWidget is added beside it only after the user clicks Split.
+    paneTabWidgets.append(ui->tabWidget);
+    activeTabWidget = ui->tabWidget;
+    setupPaneTabWidget(ui->tabWidget);
 
     // Recreate the previous session's tabs and panes. First run, or a
     // corrupt/empty session, still opens a single home-directory tab.
@@ -74,26 +73,6 @@ MainWindow::MainWindow(QWidget *parent)
         createTab(QDir::homePath());
     });
 
-    // Delete a requested tab, while keeping one tab available at all times.
-    connect(ui->tabWidget, &QTabWidget::tabCloseRequested, this, [this](int index) {
-        // The count includes the plus placeholder, so two tabs means there
-        // is only one real browser tab left and it must remain open.
-        if (ui->tabWidget->count() <= 2) {
-            return;
-        }
-
-        // Remove the page from the widget first, then safely destroy it.
-        QWidget *page = ui->tabWidget->widget(index);
-
-        // The plus placeholder is a control, not a closable browser tab.
-        if (page == newTabPlaceholder) {
-            return;
-        }
-
-        tabStates.remove(page);
-        ui->tabWidget->removeTab(index);
-        page->deleteLater();
-    });
 }
 
 void MainWindow::setupSidebar()
@@ -118,8 +97,33 @@ void MainWindow::setupSidebar()
             "}"
         ).arg(kSidebarSplitterHandleWidth)
     );
+    // The browser workspace owns one or two QTabWidgets. Keeping this split
+    // outside every tab page is what lets each side switch tabs independently.
+    browserPaneSplitter =
+        new QSplitter(Qt::Horizontal, sidebarSplitter);
+    browserPaneSplitter->setChildrenCollapsible(false);
+    browserPaneSplitter->setHandleWidth(kPaneSplitterHandleWidth);
+    browserPaneSplitter->setStyleSheet(
+        QStringLiteral(
+            "QSplitter::handle:horizontal {"
+            "  width: %1px;"
+            "}"
+            "QSplitter::handle:horizontal:hover {"
+            "  background-color: palette(mid);"
+            "}"
+        ).arg(kPaneSplitterHandleWidth)
+    );
+
+    // ui->tabWidget starts inside the Designer layout. Removing it before
+    // addWidget() makes the reparenting explicit and avoids a layout warning.
+    auto *rootLayout =
+        qobject_cast<QHBoxLayout *>(ui->centralwidget->layout());
+    rootLayout->removeWidget(ui->tabWidget);
+    browserPaneSplitter->addWidget(ui->tabWidget);
+    browserPaneSplitter->setStretchFactor(0, 1);
+
     sidebarSplitter->addWidget(pinnedSidebar);
-    sidebarSplitter->addWidget(ui->tabWidget);
+    sidebarSplitter->addWidget(browserPaneSplitter);
     sidebarSplitter->setStretchFactor(0, 0);
     sidebarSplitter->setStretchFactor(1, 1);
 
@@ -136,8 +140,6 @@ void MainWindow::setupSidebar()
         &MainWindow::saveSidebarLayout
     );
 
-    auto *rootLayout =
-        qobject_cast<QHBoxLayout *>(ui->centralwidget->layout());
     rootLayout->addWidget(sidebarSplitter);
 
     QSettings settings(
@@ -160,15 +162,24 @@ void MainWindow::setupSidebar()
             false
         ).toBool();
 
-    // Clicking a pin navigates the current tab's active pane only.
+    // Clicking a pin navigates the current tab in the most recently active
+    // split group. A pin never forces navigation back to the left group.
     connect(
         pinnedSidebar,
         &PinnedSidebar::directoryActivated,
         this,
         [this](const QString &path)
         {
-            QWidget *page = ui->tabWidget->currentWidget();
-            if (page != nullptr && page != newTabPlaceholder)
+            if (activeTabWidget == nullptr)
+            {
+                return;
+            }
+
+            QWidget *page = activeTabWidget->currentWidget();
+            QWidget *placeholder =
+                newTabPlaceholders.value(activeTabWidget);
+
+            if (page != nullptr && page != placeholder)
             {
                 navigateTo(page, path);
             }
@@ -268,8 +279,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     QMainWindow::closeEvent(event);
 }
 
-// Walk tabs in visual order so restore recreates the same left-to-right
-// sequence. The plus placeholder is a control, not a saved browser tab.
+// Persist the browser workspace as one or two independent tab groups. Each
+// group stores its own visual tab order and current tab, while the outer
+// splitter stores the width allocated to each side.
 void MainWindow::saveSession() const
 {
     QSettings settings(
@@ -277,57 +289,73 @@ void MainWindow::saveSession() const
         QStringLiteral("TurboFile")
     );
 
+    // Remove the superseded format where one global tab contained a splitter.
+    // Keeping both formats would allow stale state to recreate the old bugs.
     settings.remove(QStringLiteral("session/tabs"));
+    settings.remove(QStringLiteral("session/groups"));
+    settings.setValue(QStringLiteral("session/version"), 2);
+    settings.setValue(
+        QStringLiteral("session/groupSplitter"),
+        browserPaneSplitter != nullptr
+            ? browserPaneSplitter->saveState()
+            : QByteArray()
+    );
+    settings.setValue(
+        QStringLiteral("session/activeGroup"),
+        qMax(paneTabWidgets.indexOf(activeTabWidget), 0)
+    );
 
-    int written = 0;
-    settings.beginWriteArray(QStringLiteral("session/tabs"));
+    settings.beginWriteArray(QStringLiteral("session/groups"));
 
-    const int tabCount = ui->tabWidget->count();
-    int savedCurrent = 0;
-
-    for (int i = 0; i < tabCount; ++i)
+    for (int groupIndex = 0; groupIndex < paneTabWidgets.size(); ++groupIndex)
     {
-        QWidget *page = ui->tabWidget->widget(i);
-        if (page == nullptr || page == newTabPlaceholder)
-        {
-            continue;
-        }
+        QTabWidget *tabWidget = paneTabWidgets.at(groupIndex);
+        QWidget *placeholder = newTabPlaceholders.value(tabWidget);
+        settings.setArrayIndex(groupIndex);
 
-        auto it = tabStates.constFind(page);
-        if (it == tabStates.constEnd() || it->panes.isEmpty())
-        {
-            continue;
-        }
+        int currentRealTab = 0;
+        int writtenTabCount = 0;
+        settings.beginWriteArray(QStringLiteral("tabs"));
 
-        if (page == ui->tabWidget->currentWidget())
+        for (int tabIndex = 0; tabIndex < tabWidget->count(); ++tabIndex)
         {
-            savedCurrent = written;
-        }
+            QWidget *page = tabWidget->widget(tabIndex);
 
-        settings.setArrayIndex(written);
-        settings.setValue(
-            QStringLiteral("splitter"),
-            it->paneSplitter != nullptr
-                ? it->paneSplitter->saveState()
-                : QByteArray()
-        );
+            if (page == nullptr || page == placeholder)
+            {
+                continue;
+            }
 
-        settings.beginWriteArray(QStringLiteral("panes"));
-        for (int p = 0; p < it->panes.size(); ++p)
-        {
-            BrowserPane *pane = it->panes.at(p);
-            settings.setArrayIndex(p);
+            auto stateIterator = tabStates.constFind(page);
+            if (
+                stateIterator == tabStates.constEnd() ||
+                stateIterator->activePane == nullptr
+            )
+            {
+                continue;
+            }
+
+            if (page == tabWidget->currentWidget())
+            {
+                currentRealTab = writtenTabCount;
+            }
+
+            BrowserPane *pane = stateIterator->activePane;
+            settings.setArrayIndex(writtenTabCount);
             settings.setValue(QStringLiteral("path"), pane->currentPath());
             settings.setValue(QStringLiteral("history"), pane->history());
-            settings.setValue(QStringLiteral("historyIndex"), pane->historyIndex());
+            settings.setValue(
+                QStringLiteral("historyIndex"),
+                pane->historyIndex()
+            );
+            ++writtenTabCount;
         }
-        settings.endArray();
 
-        ++written;
+        settings.endArray();
+        settings.setValue(QStringLiteral("currentTab"), currentRealTab);
     }
 
     settings.endArray();
-    settings.setValue(QStringLiteral("session/currentTab"), savedCurrent);
 }
 
 bool MainWindow::restoreSession()
@@ -337,102 +365,148 @@ bool MainWindow::restoreSession()
         QStringLiteral("TurboFile")
     );
 
-    const int tabCount =
-        settings.beginReadArray(QStringLiteral("session/tabs"));
+    // Only the independent-group format is safe to restore. A previous
+    // per-tab split session falls back to one home tab and is replaced on exit.
+    if (settings.value(QStringLiteral("session/version"), 0).toInt() != 2)
+    {
+        return false;
+    }
 
-    if (tabCount <= 0)
+    const int groupCount =
+        settings.beginReadArray(QStringLiteral("session/groups"));
+
+    if (groupCount <= 0)
     {
         settings.endArray();
         return false;
     }
 
-    QList<QWidget *> restoredPages;
+    bool restoredAnyTab = false;
 
-    for (int i = 0; i < tabCount; ++i)
+    for (
+        int groupIndex = 0;
+        groupIndex < groupCount && groupIndex < kMaxPaneGroups;
+        ++groupIndex
+    )
     {
-        settings.setArrayIndex(i);
+        settings.setArrayIndex(groupIndex);
 
-        const QByteArray splitterState =
-            settings.value(QStringLiteral("splitter")).toByteArray();
+        QTabWidget *tabWidget =
+            groupIndex == 0
+                ? paneTabWidgets.first()
+                : createPaneTabWidget();
 
-        const int paneCount =
-            settings.beginReadArray(QStringLiteral("panes"));
-
-        struct SavedPane
+        if (tabWidget == nullptr)
         {
-            QString path;
-            QStringList history;
-            int historyIndex = -1;
-        };
-        QList<SavedPane> savedPanes;
-
-        for (int p = 0; p < paneCount && p < kMaxPanesPerTab; ++p)
-        {
-            settings.setArrayIndex(p);
-            SavedPane saved;
-            saved.path = settings.value(QStringLiteral("path")).toString();
-            saved.history =
-                settings.value(QStringLiteral("history")).toStringList();
-            saved.historyIndex =
-                settings.value(QStringLiteral("historyIndex"), -1).toInt();
-            if (saved.path.isEmpty())
-            {
-                saved.path = QDir::homePath();
-            }
-            savedPanes.append(saved);
+            continue;
         }
+
+        const int savedCurrentTab =
+            settings.value(QStringLiteral("currentTab"), 0).toInt();
+        const int tabCount =
+            settings.beginReadArray(QStringLiteral("tabs"));
+        QList<QWidget *> restoredPages;
+
+        for (int tabIndex = 0; tabIndex < tabCount; ++tabIndex)
+        {
+            settings.setArrayIndex(tabIndex);
+            QString path = settings.value(QStringLiteral("path")).toString();
+            QStringList history =
+                settings.value(QStringLiteral("history")).toStringList();
+            int historyIndex =
+                settings.value(QStringLiteral("historyIndex"), -1).toInt();
+
+            if (path.isEmpty())
+            {
+                path = QDir::homePath();
+            }
+
+            QWidget *page = createTabInGroup(tabWidget, path);
+            auto stateIterator = tabStates.find(page);
+
+            if (
+                page == nullptr ||
+                stateIterator == tabStates.end() ||
+                stateIterator->activePane == nullptr
+            )
+            {
+                continue;
+            }
+
+            stateIterator->activePane->restoreSession(
+                path,
+                history,
+                historyIndex
+            );
+            restoredPages.append(page);
+            restoredAnyTab = true;
+        }
+
         settings.endArray();
 
-        if (savedPanes.isEmpty())
+        if (restoredPages.isEmpty() && groupIndex > 0)
         {
-            continue;
+            // Corrupt settings may describe an empty second group. Remove it
+            // immediately so global actions cannot target a plus-only pane.
+            paneTabWidgets.removeAll(tabWidget);
+            newTabPlaceholders.remove(tabWidget);
+            tabWidget->hide();
+            tabWidget->deleteLater();
         }
-
-        createTab(savedPanes.first().path);
-        QWidget *page = ui->tabWidget->currentWidget();
-        if (page == nullptr || page == newTabPlaceholder)
+        else if (!restoredPages.isEmpty())
         {
-            continue;
+            int currentIndex =
+                qBound(0, savedCurrentTab, restoredPages.size() - 1);
+            tabWidget->setCurrentWidget(restoredPages.at(currentIndex));
         }
-
-        TabState &state = tabStates[page];
-        state.panes.first()->restoreSession(
-            savedPanes.first().path,
-            savedPanes.first().history,
-            savedPanes.first().historyIndex
-        );
-
-        if (savedPanes.size() > 1)
-        {
-            splitPane(page);
-            state.panes.last()->restoreSession(
-                savedPanes.at(1).path,
-                savedPanes.at(1).history,
-                savedPanes.at(1).historyIndex
-            );
-        }
-
-        if (!splitterState.isEmpty() && state.paneSplitter != nullptr)
-        {
-            state.paneSplitter->restoreState(splitterState);
-        }
-
-        restoredPages.append(page);
     }
 
     settings.endArray();
 
-    if (restoredPages.isEmpty())
+    if (!restoredAnyTab)
     {
         return false;
     }
 
-    const int current =
-        settings.value(QStringLiteral("session/currentTab"), 0).toInt();
-    if (current >= 0 && current < restoredPages.size())
+    const QByteArray splitterState =
+        settings.value(QStringLiteral("session/groupSplitter")).toByteArray();
+    bool splitterRestored = false;
+
+    if (!splitterState.isEmpty() && browserPaneSplitter != nullptr)
     {
-        ui->tabWidget->setCurrentWidget(restoredPages.at(current));
+        splitterRestored = browserPaneSplitter->restoreState(splitterState);
     }
+
+    // Missing or incompatible splitter state should still produce two usable,
+    // evenly sized groups instead of allowing either side to collapse.
+    if (
+        !splitterRestored &&
+        browserPaneSplitter != nullptr &&
+        paneTabWidgets.size() == 2
+    )
+    {
+        const int total = qMax(browserPaneSplitter->width(), 2);
+        const int each = total / 2;
+        browserPaneSplitter->setSizes({each, total - each});
+    }
+
+    int activeGroup =
+        settings.value(QStringLiteral("session/activeGroup"), 0).toInt();
+    activeTabWidget = paneTabWidgets.value(activeGroup, paneTabWidgets.first());
+
+    // An out-of-range or removed group can never receive actions. Fall back to
+    // the left group, which is guaranteed to contain a restored real tab.
+    QWidget *activePlaceholder =
+        newTabPlaceholders.value(activeTabWidget);
+    if (
+        activeTabWidget == nullptr ||
+        activeTabWidget->currentWidget() == activePlaceholder
+    )
+    {
+        activeTabWidget = paneTabWidgets.first();
+    }
+
+    updatePaneChrome();
 
     return true;
 }

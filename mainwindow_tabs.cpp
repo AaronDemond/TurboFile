@@ -1,5 +1,4 @@
 #include "mainwindow.h"
-#include "ui_mainwindow.h"
 #include "browser/browserconstants.h"
 #include "browser/browserpane.h"
 
@@ -15,6 +14,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSplitter>
+#include <QSizePolicy>
 #include <QTabWidget>
 #include <QTabBar>
 
@@ -22,26 +22,39 @@
 #include <QKeySequence>
 #include <QUrl>
 
-// Add a permanent trailing tab that acts as the new-tab button.
-void MainWindow::setupNewTabButton()
+// Configure one tab group. Every split group owns its own trailing plus tab,
+// close handling, and tab-bar geometry rather than sharing window-global state.
+void MainWindow::setupPaneTabWidget(QTabWidget *tabWidget)
 {
-    // The placeholder is a real tab page so it stays directly beside
-    // the rightmost browser tab instead of at the window's far edge.
-    newTabPlaceholder =
-        new QWidget(ui->tabWidget);
+    // Ignored horizontal size lets QSplitter allocate less than the tab bar's
+    // ideal width. QTabBar then scrolls and elides instead of painting across
+    // the neighboring pane's visual territory.
+    tabWidget->setMinimumWidth(0);
+    tabWidget->setSizePolicy(
+        QSizePolicy::Ignored,
+        QSizePolicy::Expanding
+    );
+    tabWidget->setTabsClosable(true);
+    tabWidget->setMovable(true);
 
-    // Add the placeholder before any browser tabs are created.
-    // Browser tabs will always be inserted immediately before it.
+    QTabBar *tabBar = tabWidget->tabBar();
+    tabBar->setExpanding(false);
+    tabBar->setUsesScrollButtons(true);
+    tabBar->setElideMode(Qt::ElideRight);
+
+    // The placeholder is a real page so the compact plus remains immediately
+    // after this group's rightmost real tab instead of at the pane's far edge.
+    auto *newTabPlaceholder =
+        new QWidget(tabWidget);
+    newTabPlaceholders.insert(tabWidget, newTabPlaceholder);
+
+    // Add the placeholder before browser pages. createTabInGroup() always
+    // inserts immediately before this page, preserving the trailing position.
     int newTabIndex =
-        ui->tabWidget->addTab(
+        tabWidget->addTab(
             newTabPlaceholder,
             "+"
         );
-
-    // QTabWidget owns the QTabBar. We borrow its pointer to configure
-    // the placeholder's appearance and tab-specific interactions.
-    QTabBar *tabBar =
-        ui->tabWidget->tabBar();
 
     // Explain the compact plus control when the user hovers over it.
     tabBar->setTabToolTip(newTabIndex, "New tab");
@@ -66,18 +79,70 @@ void MainWindow::setupNewTabButton()
         nullptr
     );
 
-    // Clicking the placeholder creates a normal home-directory tab.
-    // createTab() makes that new browser tab current immediately.
+    // Clicking inside either group's tab bar activates that group. Its plus
+    // button creates locally, so the right group never routes back to left.
     connect(
         tabBar,
         &QTabBar::tabBarClicked,
         this,
-        [this](int index)
+        [this, tabWidget, newTabPlaceholder](int index)
         {
-            if (ui->tabWidget->widget(index) == newTabPlaceholder)
+            activeTabWidget = tabWidget;
+
+            if (tabWidget->widget(index) == newTabPlaceholder)
             {
-                createTab(QDir::homePath());
+                createTabInGroup(tabWidget, QDir::homePath());
             }
+        }
+    );
+
+    // Keyboard-driven tab changes do not necessarily click the tab bar. Keep
+    // the group active whenever one of its real pages becomes current.
+    connect(
+        tabWidget,
+        &QTabWidget::currentChanged,
+        this,
+        [this, tabWidget, newTabPlaceholder](int index)
+        {
+            QWidget *page = tabWidget->widget(index);
+
+            if (page != nullptr && page != newTabPlaceholder)
+            {
+                activeTabWidget = tabWidget;
+            }
+        }
+    );
+
+    // Each tab close belongs to this one group. Closing its final real tab
+    // closes the entire split group only when another group remains.
+    connect(
+        tabWidget,
+        &QTabWidget::tabCloseRequested,
+        this,
+        [this, tabWidget, newTabPlaceholder](int index)
+        {
+            QWidget *page = tabWidget->widget(index);
+
+            if (page == nullptr || page == newTabPlaceholder)
+            {
+                return;
+            }
+
+            auto stateIterator = tabStates.find(page);
+            if (stateIterator == tabStates.end())
+            {
+                return;
+            }
+
+            if (tabWidget->count() <= 2)
+            {
+                closePane(page, stateIterator->activePane);
+                return;
+            }
+
+            tabStates.erase(stateIterator);
+            tabWidget->removeTab(index);
+            page->deleteLater();
         }
     );
 
@@ -87,21 +152,21 @@ void MainWindow::setupNewTabButton()
         tabBar,
         &QTabBar::tabMoved,
         this,
-        [this](int, int)
+        [this, tabWidget, newTabPlaceholder](int, int)
         {
             // Find the placeholder again because moving tabs changes indexes.
             int newTabIndex =
-                ui->tabWidget->indexOf(newTabPlaceholder);
+                tabWidget->indexOf(newTabPlaceholder);
 
             // The final tab index is always one less than the tab count.
             int lastIndex =
-                ui->tabWidget->count() - 1;
+                tabWidget->count() - 1;
 
             // Moving the placeholder to an already-correct position would
             // emit another tabMoved signal, so only move it when necessary.
             if (newTabIndex != lastIndex)
             {
-                ui->tabWidget->tabBar()->moveTab(
+                tabWidget->tabBar()->moveTab(
                     newTabIndex,
                     lastIndex
                 );
@@ -110,64 +175,90 @@ void MainWindow::setupNewTabButton()
     );
 }
 
-// Build a tab that starts with one independent explorer pane. A second
-// pane is added later through BrowserPane::splitRequested, not here.
+// Add a tab to whichever split group the user most recently interacted with.
 void MainWindow::createTab(const QString &path)
 {
-    auto *page = new QWidget();
-    auto *mainLayout = new QVBoxLayout(page);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
+    QTabWidget *target = activeTabWidget;
 
-    // Horizontal splitter holds one or two BrowserPane widgets. Children
-    // are not collapsible so a pane cannot be dragged away; Close is the
-    // only way to remove the extra explorer.
-    auto *splitter = new QSplitter(Qt::Horizontal, page);
-    splitter->setChildrenCollapsible(false);
-    splitter->setHandleWidth(kPaneSplitterHandleWidth);
-    splitter->setStyleSheet(
-        QStringLiteral(
-            "QSplitter::handle:horizontal {"
-            "  width: %1px;"
-            "}"
-            "QSplitter::handle:horizontal:hover {"
-            "  background-color: palette(mid);"
-            "}"
-        ).arg(kPaneSplitterHandleWidth)
-    );
+    if (target == nullptr && !paneTabWidgets.isEmpty())
+    {
+        target = paneTabWidgets.first();
+    }
 
-    TabState state;
-    state.paneSplitter = splitter;
-    tabStates[page] = state;
+    createTabInGroup(target, path);
+}
+
+// Construct one real tab page inside a specific split group. A tab contains
+// one BrowserPane, so changing tabs affects only that group and never replaces
+// the neighboring group's current page.
+QWidget *MainWindow::createTabInGroup(
+    QTabWidget *tabWidget,
+    const QString &path
+)
+{
+    if (tabWidget == nullptr || !newTabPlaceholders.contains(tabWidget))
+    {
+        return nullptr;
+    }
+
+    auto *page = new QWidget(tabWidget);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
 
     BrowserPane *pane = createBrowserPane(page);
-    splitter->addWidget(pane);
-    splitter->setStretchFactor(0, 1);
+    layout->addWidget(pane);
 
-    tabStates[page].panes.append(pane);
-    tabStates[page].activePane = pane;
-    updatePaneChrome(page);
-
-    mainLayout->addWidget(splitter);
+    TabState state;
+    state.tabWidget = tabWidget;
+    state.activePane = pane;
+    tabStates.insert(page, state);
 
     pane->navigateTo(path);
 
-    int newTabIndex =
-        ui->tabWidget->indexOf(newTabPlaceholder);
+    QWidget *placeholder = newTabPlaceholders.value(tabWidget);
+    int placeholderIndex = tabWidget->indexOf(placeholder);
+    int tabIndex = tabWidget->insertTab(placeholderIndex, page, QString());
 
-    int tabIndex =
-        ui->tabWidget->insertTab(
-            newTabIndex,
-            page,
-            ""
-        );
-
-    ui->tabWidget->setCurrentIndex(tabIndex);
+    activeTabWidget = tabWidget;
+    tabWidget->setCurrentIndex(tabIndex);
     updateTabTitle(page, pane->currentPath());
+    updatePaneChrome();
+    return page;
 }
 
-// Shared construction for the first pane and for a later split pane.
-// configureFileTreeView attaches the window-wide proxy so both panes
-// share one size cache instead of walking the disk twice.
+// Create a second independently clipped tab group inside the workspace split.
+QTabWidget *MainWindow::createPaneTabWidget()
+{
+    if (
+        browserPaneSplitter == nullptr ||
+        paneTabWidgets.size() >= kMaxPaneGroups
+    )
+    {
+        return nullptr;
+    }
+
+    auto *tabWidget = new QTabWidget(browserPaneSplitter);
+    browserPaneSplitter->addWidget(tabWidget);
+    browserPaneSplitter->setStretchFactor(
+        paneTabWidgets.size(),
+        1
+    );
+
+    paneTabWidgets.append(tabWidget);
+    setupPaneTabWidget(tabWidget);
+
+    const int total = qMax(browserPaneSplitter->width(), 2);
+    const int each = total / paneTabWidgets.size();
+    QList<int> sizes(paneTabWidgets.size(), each);
+    sizes.last() += total - (each * paneTabWidgets.size());
+    browserPaneSplitter->setSizes(sizes);
+
+    return tabWidget;
+}
+
+// Shared construction for every real tab in either group.
+// configureFileTreeView attaches the window-wide proxy so both groups and all
+// their tabs share one size cache instead of walking the disk repeatedly.
 BrowserPane *MainWindow::createBrowserPane(QWidget *page)
 {
     auto *pane = new BrowserPane(fileModel, page);
@@ -209,18 +300,14 @@ void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
         }
     );
 
-    // Tab titles follow the left pane only so browsing in the right pane
-    // does not rename the tab out from under the user.
+    // Every pane owns one tab page, so its path always names that local tab.
     connect(
         pane,
         &BrowserPane::pathChanged,
         this,
         [this, page, pane](const QString &path)
         {
-            if (tabStates.value(page).panes.value(0) == pane)
-            {
-                updateTabTitle(page, path);
-            }
+            updateTabTitle(page, path);
         }
     );
 
@@ -259,62 +346,100 @@ void MainWindow::setupPaneConnections(QWidget *page, BrowserPane *pane)
     );
 }
 
-void MainWindow::updatePaneChrome(QWidget *page)
+void MainWindow::updatePaneChrome()
 {
-    const TabState &state = tabStates[page];
-    const bool canSplit = state.panes.size() < kMaxPanesPerTab;
-    const bool canClose = state.panes.size() > 1;
+    const bool canSplit = paneTabWidgets.size() < kMaxPaneGroups;
+    const bool canClose = paneTabWidgets.size() > 1;
 
-    for (BrowserPane *pane : state.panes)
+    for (const TabState &state : std::as_const(tabStates))
     {
-        pane->setSplitButtonVisible(canSplit);
-        pane->setCloseButtonVisible(canClose);
+        if (state.activePane != nullptr)
+        {
+            state.activePane->setSplitButtonVisible(canSplit);
+            state.activePane->setCloseButtonVisible(canClose);
+        }
     }
 }
 
 void MainWindow::splitPane(QWidget *page)
 {
-    TabState &state = tabStates[page];
-    if (state.panes.size() >= kMaxPanesPerTab)
+    auto stateIterator = tabStates.find(page);
+    if (
+        stateIterator == tabStates.end() ||
+        stateIterator->activePane == nullptr ||
+        paneTabWidgets.size() >= kMaxPaneGroups
+    )
     {
         return;
     }
 
-    const QString startPath =
-        state.activePane != nullptr
-            ? state.activePane->currentPath()
-            : QDir::homePath();
+    QString startPath = stateIterator->activePane->currentPath();
 
-    BrowserPane *pane = createBrowserPane(page);
-    state.paneSplitter->addWidget(pane);
-    state.paneSplitter->setStretchFactor(state.panes.size(), 1);
-    state.panes.append(pane);
-    pane->navigateTo(startPath);
-    setActivePane(page, pane);
-    updatePaneChrome(page);
+    // A root can disappear between filesystem-model updates. A new group must
+    // still begin on a valid page rather than showing an unrooted tree.
+    if (startPath.isEmpty() || !QFileInfo(startPath).isDir())
+    {
+        startPath = QDir::homePath();
+    }
 
-    const int total = qMax(state.paneSplitter->width(), 2);
-    const int each = total / 2;
-    state.paneSplitter->setSizes({each, total - each});
+    QTabWidget *newGroup = createPaneTabWidget();
+
+    if (newGroup != nullptr)
+    {
+        createTabInGroup(newGroup, startPath);
+    }
 }
 
 void MainWindow::closePane(QWidget *page, BrowserPane *pane)
 {
-    TabState &state = tabStates[page];
-    if (state.panes.size() <= 1)
+    auto stateIterator = tabStates.find(page);
+    if (
+        stateIterator == tabStates.end() ||
+        stateIterator->activePane != pane ||
+        paneTabWidgets.size() <= 1
+    )
     {
         return;
     }
 
-    state.panes.removeAll(pane);
-    if (state.activePane == pane)
+    QTabWidget *group = stateIterator->tabWidget;
+
+    // Removing a split group closes all tabs it owns. Collect page pointers
+    // first because deleting the QTabWidget recursively destroys those pages.
+    QList<QWidget *> groupPages;
+    QWidget *placeholder = newTabPlaceholders.value(group);
+
+    for (int index = 0; index < group->count(); ++index)
     {
-        state.activePane = state.panes.first();
+        QWidget *groupPage = group->widget(index);
+        if (groupPage != nullptr && groupPage != placeholder)
+        {
+            groupPages.append(groupPage);
+        }
     }
 
-    pane->deleteLater();
-    updatePaneChrome(page);
-    updateTabTitle(page, state.panes.first()->currentPath());
+    for (QWidget *groupPage : groupPages)
+    {
+        tabStates.remove(groupPage);
+    }
+
+    paneTabWidgets.removeAll(group);
+    newTabPlaceholders.remove(group);
+
+    // Hiding immediately removes the group from QSplitter's active layout.
+    // deleteLater() then destroys it safely after the current button signal
+    // finishes, including every tab page and BrowserPane it still owns.
+    group->hide();
+    group->deleteLater();
+
+    activeTabWidget = paneTabWidgets.value(0, nullptr);
+
+    if (activeTabWidget != nullptr)
+    {
+        activeTabWidget->setFocus(Qt::OtherFocusReason);
+    }
+
+    updatePaneChrome();
 }
 
 void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
@@ -325,7 +450,19 @@ void MainWindow::setActivePane(QWidget *page, BrowserPane *pane)
         return;
     }
 
-    it->activePane = pane;
+    // A tab page owns exactly one immutable BrowserPane. Reject a mismatched
+    // signal instead of allowing one page to point at another page's explorer.
+    if (it->activePane != pane)
+    {
+        return;
+    }
+
+    activeTabWidget = it->tabWidget;
+
+    if (it->tabWidget != nullptr)
+    {
+        it->tabWidget->setCurrentWidget(page);
+    }
 }
 
 QTreeView *MainWindow::fileTreeForPage(QWidget *page) const
@@ -354,8 +491,14 @@ void MainWindow::updateTabTitle(QWidget *page, const QString &path) {
     }
 
     // ensure the tab has not been closed and then set the tab text
-    int tabIndex = ui->tabWidget->indexOf(page);
+    auto stateIterator = tabStates.constFind(page);
+    if (stateIterator == tabStates.constEnd() || stateIterator->tabWidget == nullptr)
+    {
+        return;
+    }
+
+    int tabIndex = stateIterator->tabWidget->indexOf(page);
     if (tabIndex != -1) {
-        ui->tabWidget->setTabText(tabIndex, tabName);
+        stateIterator->tabWidget->setTabText(tabIndex, tabName);
     }
 }
